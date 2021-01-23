@@ -210,6 +210,12 @@ bool Match(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs
 		match_result.push_back(p);
 	}
 
+	cudaFreeHost(lhs_descriptor_host);
+	cudaFreeHost(rhs_descriptor_host);
+	cudaFree(lhs_descriptor_device);
+	cudaFree(rhs_descriptor_device);
+	cudaFree(distance_matrix);
+
 	cudaFree(device_score);
 	cudaFree(device_index);
 	cudaFreeHost(host_score);
