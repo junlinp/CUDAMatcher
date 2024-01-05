@@ -9,6 +9,7 @@
 
 void MATCH() {
     const size_t descriptor_num = 1024 * 16;
+
     std::vector<Descriptor> lhs(descriptor_num), rhs(descriptor_num);
     std::vector<int> shuffle(descriptor_num);
     std::default_random_engine engine;
@@ -23,19 +24,21 @@ void MATCH() {
     }
 
     
-    //std::random_shuffle(shuffle.begin() shuffle.end());
+    std::random_shuffle(shuffle.begin(), shuffle.end());
 
     for (int i = 0; i < descriptor_num; i++) {
         rhs[i] = lhs[shuffle[i]];
     }
 
     std::vector<std::pair<int, int>> match_result;
-
+    auto start = std::chrono::high_resolution_clock::now();
     Match(lhs, rhs, match_result);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::cout << "time elapsed : " << (end - start).count() / 1000 / 1000 << " ms";
 
     for (std::pair<int, int> p : match_result) {
         if (p.second != shuffle[p.first]) {
-            std::cout << "error" << std::endl;
+            //std::cout << "error" << std::endl;
         }
     }
 }
