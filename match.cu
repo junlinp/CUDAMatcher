@@ -326,16 +326,30 @@ __global__ void ComputeNearestNeighborV4(float* pts1, float* pts2, float* score,
 		return;
 	}
 
+	__shared__ float4 buffer_pts1[8 * 32];
+	__shared__ float4 buffer_pts2[32 * 32];
 	float best_score = 1e30f;
 	int best_index = -1;
 	float4* pts1_vec = (float4*)pts1;
 	float4* pts2_vec = (float4*)pts2;
 
-	for (int p2 = lane; p2 < WIDTH; p2 += 32) {
+	for (int k = lane; k < 32; k += 32) {
+		buffer_pts1[warp * 32 + k] = pts1_vec[p1 * 32 + k];
+	}
+	__syncthreads();
+
+	for (int p2_base = 0; p2_base < WIDTH; p2_base += 32) {
+		for (int item = threadIdx.x; item < 32 * 32; item += blockDim.x) {
+			int p2_offset = item / 32;
+			int k = item % 32;
+			buffer_pts2[p2_offset * 32 + k] = pts2_vec[(p2_base + p2_offset) * 32 + k];
+		}
+		__syncthreads();
+
 		float d = 0.0f;
 		for (int k = 0; k < 32; k++) {
-			float4 v1 = pts1_vec[p1 * 32 + k];
-			float4 v2 = pts2_vec[p2 * 32 + k];
+			float4 v1 = buffer_pts1[warp * 32 + k];
+			float4 v2 = buffer_pts2[lane * 32 + k];
 			float a = v1.x - v2.x;
 			d += a * a;
 			a = v1.y - v2.y;
@@ -347,8 +361,9 @@ __global__ void ComputeNearestNeighborV4(float* pts1, float* pts2, float* score,
 		}
 		if (d < best_score) {
 			best_score = d;
-			best_index = p2;
+			best_index = p2_base + lane;
 		}
+		__syncthreads();
 	}
 
 	WarpReduceMin(best_score, best_index);

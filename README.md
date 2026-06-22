@@ -33,11 +33,10 @@ bool MatchV4(...);
   avoids materializing the full `N x N` distance matrix.
 - `v3`: keeps the v2 fused tiled computation and replaces the per-tile shared
   memory scan with warp-level nearest-neighbor reduction.
-- `v4`: direct warp-per-descriptor nearest-neighbor scan. It does not allocate a
-  full pairwise distance matrix or a per-tile score matrix; each warp keeps only
-  the current best distance/index for one left descriptor. This version is a
-  no-matrix baseline and is slower than v3 because it gives up shared-memory
-  reuse of RHS descriptor tiles.
+- `v4`: warp-per-descriptor nearest-neighbor scan with shared-memory tiles for
+  the 8 left descriptors owned by a block and each 32-descriptor right tile. It
+  does not allocate a full pairwise distance matrix or a per-tile score matrix;
+  each warp keeps only the current best distance/index for one left descriptor.
 
 On an NVIDIA GeForce RTX 3050 Ti Laptop GPU, the matcher benchmark for
 `16,384 x 16,384` descriptors produced these sample runs:
@@ -46,14 +45,14 @@ On an NVIDIA GeForce RTX 3050 Ti Laptop GPU, the matcher benchmark for
 v1: 285 ms, 184 ms, 180 ms
 v2: 83 ms, 81 ms, 77 ms
 v3: 66 ms, 63 ms, 63 ms
-v4: 355 ms, 353 ms, 351 ms
+v4: 300 ms, 295 ms, 305 ms
 ```
 
 All runs reported 0 mismatches. Median timings were 184 ms for v1, 81 ms for
-v2, 63 ms for v3, and 353 ms for v4. On that run, v3 was 2.9x faster than v1
+v2, 63 ms for v3, and 300 ms for v4. On that run, v3 was 2.9x faster than v1
 and 1.29x faster than v2. v4 confirms that avoiding every intermediate matrix
-is not enough by itself; preserving tiled data reuse is more important for this
-benchmark.
+is not enough by itself; the tile layout and amount of work reused per block
+matter heavily for this benchmark.
 
 ## Build
 
