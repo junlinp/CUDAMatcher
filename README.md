@@ -54,11 +54,12 @@ bool MatchV9(...);
   into registers, simplified lane-per-row reduction logic, and reduced shared
   transposition.
 - `v6`: tiled top-1 matcher. For each block, shared-memory tiles for right
-  descriptors are loaded one-by-one and each warp directly maintains the current
-  best index/distance, still without building an `N x N` matrix.
-- `v7`: each A-block scans right-side B blocks end-to-end and updates best in
-  one pass. The descriptor row is loaded once per block into shared memory and
-  reused across all B tiles.
+  descriptors are loaded one-by-one and reused across a `32 x 32` left/right
+  tile. The kernel updates the current best index/distance online, still
+  without building an `N x N` matrix.
+- `v7`: keeps the v6 `32 x 32` tiled top-1 layout and moves per-row best
+  score/index tracking from shared memory into registers while preserving the
+  bank-friendly shared-memory rotation step.
 - `v8`: memory-bandwidth-oriented matcher based on `uint8` descriptors. Input
   descriptors are converted to `uint8` on host before transfer and distance is
   computed with integer arithmetic and top-1 reduction.
@@ -71,18 +72,18 @@ On an NVIDIA GeForce RTX 3050 Ti Laptop GPU, the matcher benchmark for
 `16,384 x 16,384` descriptors produced these sample runs:
 
 ```text
-v1: 214 ms, 214 ms, 214 ms
-v2: 93 ms, 93 ms, 93 ms
-v3: 69 ms, 69 ms, 69 ms
-v4: 319 ms, 319 ms, 319 ms
-v5a: 60 ms, 60 ms, 60 ms
-v5b: 63 ms, 63 ms, 63 ms
-v5c: 99 ms, 99 ms, 99 ms
-v5: 96 ms, 96 ms, 96 ms
-v6: 327 ms, 327 ms, 327 ms
-v7: 315 ms, 315 ms, 315 ms
-v8: 1165 ms, 1165 ms, 1165 ms
-v9: 327 ms, 327 ms, 327 ms
+v1: 380 ms
+v2: 80 ms
+v3: 62 ms
+v4: 296 ms
+v5a: 64 ms
+v5b: 67 ms
+v5c: 103 ms
+v5: 102 ms
+v6: 66 ms
+v7: 60 ms
+v8: 1100 ms
+v9: 278 ms
 ```
 
 All runs reported 0 mismatches. On this device, v6–v9 are all correct.

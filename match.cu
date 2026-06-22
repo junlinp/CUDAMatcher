@@ -718,116 +718,208 @@ __global__ void ComputeNearestNeighborV4(float* pts1, float* pts2, float* score,
 }
 
 __global__ void ComputeNearestNeighborV6(const float* pts1, const float* pts2, float* score, int* index, int WIDTH) {
-	int lane = threadIdx.x;
-	int warp = threadIdx.y;
-	int p1 = blockIdx.x * blockDim.y + warp;
-	bool valid = p1 < WIDTH;
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int p1_base = blockIdx.x * blockDim.x;
+	const float4* pts1_vec = (const float4*)pts1;
+	const float4* pts2_vec = (const float4*)pts2;
 
-	__shared__ float4 buffer_pts1[4 * 32];
+	__shared__ float4 buffer_pts1[32 * 32];
 	__shared__ float4 buffer_pts2[32 * 32];
-	if (lane < 32) {
-		buffer_pts1[warp * 32 + lane] = valid ? ((const float4*)pts1)[p1 * 32 + lane] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+	__shared__ float score_buffer[32 * 32];
+	__shared__ float rotation_score[32 * 32];
+	__shared__ float best_score[32];
+	__shared__ int best_index[32];
+
+	for (int i = 0; i < 4; i++) {
+		buffer_pts1[(ty * 4 + i) * 32 + tx] = pts1_vec[(p1_base + ty * 4 + i) * 32 + tx];
+		if (tx == 0) {
+			int row = 4 * ty + i;
+			best_score[row] = 1e30f;
+			best_index[row] = -1;
+		}
 	}
 	__syncthreads();
 
-	float best_score = 1e30f;
-	int best_index = -1;
-
-	for (int p2_base = 0; p2_base < WIDTH; p2_base += 32) {
-		int linear = threadIdx.x + threadIdx.y * blockDim.x;
-		for (int item = linear; item < 32 * 32; item += blockDim.x * blockDim.y) {
-			int p2_offset = item / 32;
-			int k = item % 32;
-			buffer_pts2[item] = ((const float4*)pts2)[(p2_base + p2_offset) * 32 + k];
+	for (int p2 = 0; p2 < WIDTH; p2 += 32) {
+		for (int i = 0; i < 4; i++) {
+			buffer_pts2[(ty * 4 + i) * 32 + tx] = pts2_vec[(p2 + ty * 4 + i) * 32 + tx];
 		}
 		__syncthreads();
+		if (ty < 4) {
+			float ss[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+			for (int i = 0; i < 32; i++) {
+				float4 v1[2];
+				#pragma unroll
+				for (int dx = 0; dx < 2; dx++) {
+					v1[dx] = buffer_pts1[(16 * dx + tx) % 32 * 32 + (i + tx) % 32];
+				}
 
-		float d = 0.0f;
-		if (valid) {
-			for (int k = 0; k < 32; k++) {
-				float4 v1 = buffer_pts1[warp * 32 + k];
-				float4 v2 = buffer_pts2[lane * 32 + k];
-				float a = v1.x - v2.x;
-				d += a * a;
-				a = v1.y - v2.y;
-				d += a * a;
-				a = v1.z - v2.z;
-				d += a * a;
-				a = v1.w - v2.w;
-				d += a * a;
+				for (int dy = 0; dy < 4; dy++) {
+					float4 pt2 = buffer_pts2[(4 * (2 * ty + tx / 16) + dy) * 32 + (i + tx) % 32];
+					float a = pt2.x - v1[0].x;
+					ss[dy] += a * a;
+					a = pt2.y - v1[0].y;
+					ss[dy] += a * a;
+					a = pt2.z - v1[0].z;
+					ss[dy] += a * a;
+					a = pt2.w - v1[0].w;
+					ss[dy] += a * a;
+
+					a = pt2.x - v1[1].x;
+					ss[4 + dy] += a * a;
+					a = pt2.y - v1[1].y;
+					ss[4 + dy] += a * a;
+					a = pt2.z - v1[1].z;
+					ss[4 + dy] += a * a;
+					a = pt2.w - v1[1].w;
+					ss[4 + dy] += a * a;
+				}
+			}
+			for (int dy = 0; dy < 4; dy++) {
+				for (int dx = 0; dx < 2; dx++) {
+					int row = (tx + 16 * dx) % 32;
+					int col = (4 * (2 * ty + tx / 16) + dy);
+					score_buffer[row + 32 * col] = ss[dx * 4 + dy];
+				}
 			}
 		}
-		if (valid && d < best_score) {
-			best_score = d;
-			best_index = p2_base + lane;
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			rotation_score[(tx + (4 * ty + i)) % 32 + 32 * (4 * ty + i)] = score_buffer[tx + 32 * (4 * ty + i)];
+		}
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			int row = 4 * ty + i;
+			float tile_best_score = rotation_score[tx * 32 + (row + tx) % 32];
+			int tile_best_index = p2 + tx;
+			WarpReduceMin(tile_best_score, tile_best_index);
+			if (tx == 0 && tile_best_score < best_score[row]) {
+				best_score[row] = tile_best_score;
+				best_index[row] = tile_best_index;
+			}
 		}
 		__syncthreads();
 	}
 
-	if (valid) {
-		WarpReduceMin(best_score, best_index);
-		if (lane == 0) {
-			score[p1] = best_score;
-			index[p1] = best_index;
+	if (tx == 0) {
+		for (int i = 0; i < 4; i++) {
+			int row = 4 * ty + i;
+			int p1 = p1_base + row;
+			score[p1] = best_score[row];
+			index[p1] = best_index[row];
 		}
 	}
 }
 
 __global__ void ComputeNearestNeighborV7(const float* pts1, const float* pts2, float* score, int* index, int WIDTH) {
-	int lane = threadIdx.x;
-	int warp = threadIdx.y;
-	int p1 = blockIdx.x * 8 + warp;
-	bool valid = p1 < WIDTH;
-	float best_score = 1e30f;
-	int best_index = -1;
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int p1_base = blockIdx.x * blockDim.x;
+	const float4* pts1_vec = (const float4*)pts1;
+	const float4* pts2_vec = (const float4*)pts2;
 
-	__shared__ float4 buffer_pts1[8 * 32];
+	__shared__ float4 buffer_pts1[32 * 32];
 	__shared__ float4 buffer_pts2[32 * 32];
-	float4* lhs_ptr = (float4*)pts1;
-	float4* rhs_ptr = (float4*)pts2;
+	__shared__ float score_buffer[32 * 32];
+	__shared__ float rotation_score[32 * 32];
 
-	if (lane < 32) {
-		buffer_pts1[warp * 32 + lane] = valid ? lhs_ptr[p1 * 32 + lane] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+	float best0 = 1e30f;
+	float best1 = 1e30f;
+	float best2 = 1e30f;
+	float best3 = 1e30f;
+	int best_index0 = -1;
+	int best_index1 = -1;
+	int best_index2 = -1;
+	int best_index3 = -1;
+
+	for (int i = 0; i < 4; i++) {
+		buffer_pts1[(ty * 4 + i) * 32 + tx] = pts1_vec[(p1_base + ty * 4 + i) * 32 + tx];
 	}
 	__syncthreads();
 
-	for (int p2_base = 0; p2_base < WIDTH; p2_base += 32) {
-		int linear = threadIdx.x + threadIdx.y * blockDim.x;
-		for (int item = linear; item < 32 * 32; item += blockDim.x * blockDim.y) {
-			int p2_offset = item / 32;
-			int k = item % 32;
-			buffer_pts2[item] = rhs_ptr[(p2_base + p2_offset) * 32 + k];
+	for (int p2 = 0; p2 < WIDTH; p2 += 32) {
+		for (int i = 0; i < 4; i++) {
+			buffer_pts2[(ty * 4 + i) * 32 + tx] = pts2_vec[(p2 + ty * 4 + i) * 32 + tx];
 		}
 		__syncthreads();
+		if (ty < 4) {
+			float ss[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+			for (int i = 0; i < 32; i++) {
+				float4 v1[2];
+				#pragma unroll
+				for (int dx = 0; dx < 2; dx++) {
+					v1[dx] = buffer_pts1[(16 * dx + tx) % 32 * 32 + (i + tx) % 32];
+				}
 
-		float d = 0.0f;
-		if (valid) {
-			for (int k = 0; k < 32; k++) {
-				float4 v1 = buffer_pts1[warp * 32 + k];
-				float4 v2 = buffer_pts2[lane * 32 + k];
-				float a = v1.x - v2.x;
-				d += a * a;
-				a = v1.y - v2.y;
-				d += a * a;
-				a = v1.z - v2.z;
-				d += a * a;
-				a = v1.w - v2.w;
-				d += a * a;
+				for (int dy = 0; dy < 4; dy++) {
+					float4 pt2 = buffer_pts2[(4 * (2 * ty + tx / 16) + dy) * 32 + (i + tx) % 32];
+					float a = pt2.x - v1[0].x;
+					ss[dy] += a * a;
+					a = pt2.y - v1[0].y;
+					ss[dy] += a * a;
+					a = pt2.z - v1[0].z;
+					ss[dy] += a * a;
+					a = pt2.w - v1[0].w;
+					ss[dy] += a * a;
+
+					a = pt2.x - v1[1].x;
+					ss[4 + dy] += a * a;
+					a = pt2.y - v1[1].y;
+					ss[4 + dy] += a * a;
+					a = pt2.z - v1[1].z;
+					ss[4 + dy] += a * a;
+					a = pt2.w - v1[1].w;
+					ss[4 + dy] += a * a;
+				}
+			}
+			for (int dy = 0; dy < 4; dy++) {
+				for (int dx = 0; dx < 2; dx++) {
+					int row = (tx + 16 * dx) % 32;
+					int col = 4 * (2 * ty + tx / 16) + dy;
+					score_buffer[row + 32 * col] = ss[dx * 4 + dy];
+				}
 			}
 		}
-		if (valid && d < best_score) {
-			best_score = d;
-			best_index = p2_base + lane;
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			rotation_score[(tx + (4 * ty + i)) % 32 + 32 * (4 * ty + i)] = score_buffer[tx + 32 * (4 * ty + i)];
+		}
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			int row = 4 * ty + i;
+			float tile_best_score = rotation_score[tx * 32 + (row + tx) % 32];
+			int tile_best_index = p2 + tx;
+			WarpReduceMin(tile_best_score, tile_best_index);
+			if (tx == 0) {
+				if (i == 0 && tile_best_score < best0) {
+					best0 = tile_best_score;
+					best_index0 = tile_best_index;
+				} else if (i == 1 && tile_best_score < best1) {
+					best1 = tile_best_score;
+					best_index1 = tile_best_index;
+				} else if (i == 2 && tile_best_score < best2) {
+					best2 = tile_best_score;
+					best_index2 = tile_best_index;
+				} else if (i == 3 && tile_best_score < best3) {
+					best3 = tile_best_score;
+					best_index3 = tile_best_index;
+				}
+			}
 		}
 		__syncthreads();
 	}
 
-	if (valid) {
-		WarpReduceMin(best_score, best_index);
-		if (lane == 0) {
-			score[p1] = best_score;
-			index[p1] = best_index;
-		}
+	if (tx == 0) {
+		int p1_start = p1_base + ty * 4;
+		score[p1_start + 0] = best0;
+		index[p1_start + 0] = best_index0;
+		score[p1_start + 1] = best1;
+		index[p1_start + 1] = best_index1;
+		score[p1_start + 2] = best2;
+		index[p1_start + 2] = best_index2;
+		score[p1_start + 3] = best3;
+		index[p1_start + 3] = best_index3;
 	}
 }
 
@@ -1260,8 +1352,8 @@ bool MatchV6(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 	float* device_score = nullptr;
 	int* host_index = nullptr;
 	int* device_index = nullptr;
-	dim3 thread(32, 4);
-	dim3 block(size / 4, 1);
+	dim3 thread(32, 8);
+	dim3 block(size / 32, 1);
 	bool success = false;
 
 	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
@@ -1316,7 +1408,7 @@ bool MatchV7(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 	int* host_index = nullptr;
 	int* device_index = nullptr;
 	dim3 thread(32, 8);
-	dim3 block(size / 8, 1);
+	dim3 block(size / 32, 1);
 	bool success = false;
 
 	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
