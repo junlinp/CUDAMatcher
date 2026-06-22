@@ -29,18 +29,28 @@ void MATCH() {
     for (int i = 0; i < descriptor_num; i++) {
         rhs[i] = lhs[shuffle[i]];
     }
+    std::vector<int> inverse_shuffle(descriptor_num);
+    for (int i = 0; i < descriptor_num; i++) {
+        inverse_shuffle[shuffle[i]] = i;
+    }
 
     std::vector<std::pair<int, int>> match_result;
     auto start = std::chrono::high_resolution_clock::now();
-    Match(lhs, rhs, match_result);
+    bool success = Match(lhs, rhs, match_result);
     auto end = std::chrono::high_resolution_clock::now();
-    std::cout << "time elapsed : " << (end - start).count() / 1000 / 1000 << " ms";
+    std::cout << "time elapsed : " << (end - start).count() / 1000 / 1000 << " ms" << std::endl;
+    if (!success) {
+        std::cout << "match failed" << std::endl;
+        return;
+    }
 
+    int mismatch_count = 0;
     for (std::pair<int, int> p : match_result) {
-        if (p.second != shuffle[p.first]) {
-            //std::cout << "error" << std::endl;
+        if (p.second != inverse_shuffle[p.first]) {
+            mismatch_count++;
         }
     }
+    std::cout << "mismatch count : " << mismatch_count << std::endl;
 }
 int main(int argc, char** argv) {
     MATCH();

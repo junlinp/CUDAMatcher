@@ -1,42 +1,27 @@
 #include "match.h"
+#include <algorithm>
+#include <cstdio>
 #include "cuda_runtime.h"
-#include "cuda_device_runtime_api.h"
-#include "device_launch_parameters.h"
-#include "device_functions.h"
-#include "driver_types.h"
-__global__ void PreliminaryComputeDistanceMatrix(float* pts1, float* pts2, float* distance_matrix, int WIDTH) {
+
+__global__ void ComputeNearestNeighbor(float* pts1, float* pts2, float* score, int* index, int WIDTH) {
 	int tx = threadIdx.x;
 	int ty = threadIdx.y;
 	int p1_base = blockIdx.x * blockDim.x;
-	int p1 = p1_base + tx;
-	if (ty == 0) {
-		
-		for (int p2 = 0; p2 < WIDTH; p2++) {
-			float* pts1_ptr = pts1 + p1 * 128;
-			float* pts2_ptr = pts2 + p2 * 128;
-			float d = 0.0;
-			for (int k = 0; k < 128; k++) {
-				float temp = pts1_ptr[k] - pts2_ptr[k];
-				d += temp * temp;
-			}
-			distance_matrix[p1 * WIDTH + p2] = d;
-		}
-	}
-}
-
-__global__ void ComputeDistanceMatrix(float* pts1, float* pts2, float* distance_matrix, int WIDTH) {
-
-	int tx = threadIdx.x;
-	int ty = threadIdx.y;
-	int p1_base = blockIdx.x * blockDim.x;
-	int p1 = p1_base + tx;
 	__shared__ float4 buffer_pts1[32 * 32];
 	__shared__ float4 buffer_pts2[32 * 32];
-	__shared__ float score[32 * 32];
+	__shared__ float tile_score[32 * 32];
+	__shared__ float score_buffer[32 * 32];
 	__shared__ float rotation_score[32 * 32];
+	__shared__ float best_score[32];
+	__shared__ int best_index[32];
 
 	for (int i = 0; i < 4; i++) {
 		buffer_pts1[(ty * 4 + i) * 32 + tx] = ((float4*)pts1)[(p1_base + ty * 4 + i) * 32 + tx];
+		if (tx == 0) {
+			int row = 4 * ty + i;
+			best_score[row] = 1e30f;
+			best_index[row] = -1;
+		}
 	}
 	__syncthreads();
 
@@ -78,75 +63,57 @@ __global__ void ComputeDistanceMatrix(float* pts1, float* pts2, float* distance_
 				for (int dx = 0; dx < 2; dx++) {
 					int row = (tx + 16 * dx) % 32;
 					int col = ( 4 * (2 * ty + tx / 16) + dy);
-					score[row + 32 * col] = ss[dx * 4 + dy];
+					score_buffer[row + 32 * col] = ss[dx * 4 + dy];
 				}
 			}
 		}
 		__syncthreads();
 		for (int i = 0; i < 4; i++) {
-			rotation_score[(tx + ( 4 * ty + i)) % 32 + 32 * (4 * ty + i)] = score[tx + 32 * (4 * ty + i)];
+			rotation_score[(tx + ( 4 * ty + i)) % 32 + 32 * (4 * ty + i)] = score_buffer[tx + 32 * (4 * ty + i)];
 		}
 		__syncthreads();
 		for (int i = 0; i < 4; i++) {
-			distance_matrix[(p1_base + 4 * ty + i) * WIDTH + p2 + tx] = rotation_score[tx * 32 + (ty * 4 + i + tx) % 32];
-		}
-	}	
-	
-}
-
-#define BATCH_NUM_ 256
-__global__ void CloseElement(float* distance_matrix, int WIDTH, float* score, int* index) {
-	int p1 = blockDim.x * blockIdx.x + threadIdx.x;
-	int p1_base = blockDim.x * blockIdx.x;
-	int tx = threadIdx.x;
-	int ty = threadIdx.y;
-	int index_ = -1;
-	float minimum_score = 1e10f;
-
-	__shared__ float buffer_distance[32 * BATCH_NUM_];
-	__shared__ int buffer_index[32 * 32];
-	float d = 0.0;
-	for (int i = 0; i < WIDTH; i += BATCH_NUM_) {
-		for (int batch_index = 0; batch_index < BATCH_NUM_ / 32; batch_index++) {
-			buffer_distance[ty * BATCH_NUM_ + (tx + ty) % 32 + batch_index * 32] = distance_matrix[(p1_base + ty) * WIDTH + i + tx + batch_index * 32];
+			int row = 4 * ty + i;
+			tile_score[row * 32 + tx] = rotation_score[tx * 32 + (row + tx) % 32];
 		}
 		__syncthreads();
-		for (int batch_index = 0; batch_index < BATCH_NUM_ / 32; batch_index++) {
-			d = buffer_distance[tx * BATCH_NUM_ + (tx + ty) % 32 + batch_index * 32];
-			if (d < minimum_score) {
-				minimum_score = d;
-				index_ = i + batch_index * 32 + ty;
+		if (tx == 0) {
+			for (int i = 0; i < 4; i++) {
+				int row = 4 * ty + i;
+				float current_score = best_score[row];
+				int current_index = best_index[row];
+				for (int col = 0; col < 32; col++) {
+					float d = tile_score[row * 32 + col];
+					if (d < current_score) {
+						current_score = d;
+						current_index = p2 + col;
+					}
+				}
+				best_score[row] = current_score;
+				best_index[row] = current_index;
 			}
 		}
 		__syncthreads();
 	}
-	__syncthreads();
-	buffer_distance[tx * 32 + (ty + tx) % 32] = minimum_score;
-	buffer_index[tx * 32 + (ty + tx) % 32] = index_;
-	__syncthreads();
-	if (ty == 0) {
-		for (int i = 0; i < 32; i++) {
-			float dd = buffer_distance[tx * 32 + (i + tx) % 32];
-			if (dd < minimum_score) {
-				minimum_score = dd;
-				index_ =buffer_index[tx * 32 + (i + tx) % 32];
 
-			}
+	if (tx == 0) {
+		for (int i = 0; i < 4; i++) {
+			int row = 4 * ty + i;
+			int p1 = p1_base + row;
+			score[p1] = best_score[row];
+			index[p1] = best_index[row];
 		}
-		score[p1] = minimum_score;
-		index[p1] = index_;
-
-		//printf("%d\n", p1);
 	}
 }
 
 #define CUDAErrorCheck(x) ErrorCheckImp((x), __FILE__, __LINE__)
 
-void ErrorCheckImp(cudaError_t code, const char* file_name, const int line) {
+bool ErrorCheckImp(cudaError_t code, const char* file_name, const int line) {
 	if (code != cudaSuccess) {
 		fprintf(stderr, "ERROR Checked : %s in %s %d\n", cudaGetErrorString(code), file_name, line);
-		
+		return false;
 	}
+	return true;
 }
 void CopyDescriptorToPinnedMemory(const std::vector<Descriptor>& descriptors, float* host_memory) {
 	size_t offset = 0;
@@ -158,68 +125,58 @@ void CopyDescriptorToPinnedMemory(const std::vector<Descriptor>& descriptors, fl
 
 bool Match(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
 
-	// we assume that lhs and rhs are the same of size
 	size_t size = lhs.size();
+	if (size == 0 || size != rhs.size() || size % 32 != 0) {
+		fprintf(stderr, "ERROR Checked : invalid descriptor sizes\n");
+		return false;
+	}
+	match_result.clear();
 
 	float* lhs_descriptor_host = nullptr;
 	float* rhs_descriptor_host = nullptr;
 	float* lhs_descriptor_device = nullptr;
 	float* rhs_descriptor_device = nullptr;
+	float* device_score = nullptr;
+	int* host_index = nullptr;
+	int* device_index = nullptr;
+	dim3 thread(32, 8);
+	dim3 block(size / 32, 1);
+	bool success = false;
 
-	CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(float) * size * 128));
-	CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(float) * size * 128));
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
 	// copy the data
 	CopyDescriptorToPinnedMemory(lhs, lhs_descriptor_host);
 	CopyDescriptorToPinnedMemory(rhs, rhs_descriptor_host);
 
-	CUDAErrorCheck(cudaMalloc(&lhs_descriptor_device, sizeof(float) * size * 128));
-	CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(float) * size * 128));
+	if (!CUDAErrorCheck(cudaMalloc(&lhs_descriptor_device, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(float) * size * 128))) goto cleanup;
 	// copy from host to device
-	CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice));
-	CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice));
+	if (!CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
 
+	if (!CUDAErrorCheck(cudaMallocHost(&host_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size))) goto cleanup;
 
-
-	float* distance_matrix = nullptr;
-	CUDAErrorCheck(cudaMalloc(&distance_matrix, sizeof(float) * size * size));
-
-	float* host_score = nullptr;
-	float* device_score = nullptr;
-	int* host_index = nullptr;
-	int* device_index = nullptr;
-
-	CUDAErrorCheck(cudaMallocHost(&host_score, sizeof(float) * size));
-	CUDAErrorCheck(cudaMallocHost(&host_index, sizeof(int) * size));
-	CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size));
-	CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size));
-	dim3 distance_thread(32, 8);
-	dim3 distance_block(size / 32, 1);
-	ComputeDistanceMatrix<<<distance_block, distance_thread>>>(lhs_descriptor_device, rhs_descriptor_device, distance_matrix, size);
-	dim3 thread(32, 32);
-	dim3 block(size / 32, 1);
-
-	
-
-	CloseElement<<<block, thread>>>(distance_matrix, size, device_score, device_index);
-
-	CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost));
-	CUDAErrorCheck(cudaMemcpy(host_score, device_score, sizeof(float) * size, cudaMemcpyDeviceToHost));
+	ComputeNearestNeighbor<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, device_score, device_index, size);
+	if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost))) goto cleanup;
 
 	for (int i = 0; i < size; i++) {
 		std::pair<int, int> p(i, host_index[i]);
 		match_result.push_back(p);
 	}
+	success = true;
 
-	cudaFreeHost(lhs_descriptor_host);
-	cudaFreeHost(rhs_descriptor_host);
-	cudaFree(lhs_descriptor_device);
-	cudaFree(rhs_descriptor_device);
-	cudaFree(distance_matrix);
-
-	cudaFree(device_score);
-	cudaFree(device_index);
-	cudaFreeHost(host_score);
-	cudaFreeHost(host_index);
-
-	return true;
+cleanup:
+	if (lhs_descriptor_host) cudaFreeHost(lhs_descriptor_host);
+	if (rhs_descriptor_host) cudaFreeHost(rhs_descriptor_host);
+	if (lhs_descriptor_device) cudaFree(lhs_descriptor_device);
+	if (rhs_descriptor_device) cudaFree(rhs_descriptor_device);
+	if (device_score) cudaFree(device_score);
+	if (device_index) cudaFree(device_index);
+	if (host_index) cudaFreeHost(host_index);
+	if (!success) match_result.clear();
+	return success;
 }
