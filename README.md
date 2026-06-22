@@ -21,6 +21,10 @@ bool MatchV2(...);
 bool MatchV3(...);
 bool MatchV4(...);
 bool MatchV5(...);
+bool MatchV6(...);
+bool MatchV7(...);
+bool MatchV8(...);
+bool MatchV9(...);
 ```
 
 `Descriptor` is `std::array<float, 128>`. The current CUDA matcher expects
@@ -42,23 +46,36 @@ bool MatchV5(...);
   distance/index like v4, but uses the tiled warp-reduction path from v3 to
   increase useful work per shared-memory tile. `Match(...)` currently defaults
   to v5.
+- `v6`: tiled top-1 matcher. For each block, shared-memory tiles for right
+  descriptors are loaded one-by-one and each warp directly maintains the current
+  best index/distance, still without building an `N x N` matrix.
+- `v7`: each A-block scans right-side B blocks end-to-end and updates best in
+  one pass. The descriptor row is loaded once per block into shared memory and
+  reused across all B tiles.
+- `v8`: memory-bandwidth-oriented matcher based on `uint8` descriptors. Input
+  descriptors are converted to `uint8` on host before transfer and distance is
+  computed with integer arithmetic and top-1 reduction.
+- `v9`: Tensor Core/WMMA path using cuBLAS-GEMM. Descriptors are converted to
+  `half`, dot-product matrix is computed in GEMM using tensor-core-capable
+  operations, and nearest-neighbor top-1 is recovered from
+  `||a||² + ||b||² - 2ABᵀ`; the closest index is reduced per row after GEMM.
 
 On an NVIDIA GeForce RTX 3050 Ti Laptop GPU, the matcher benchmark for
 `16,384 x 16,384` descriptors produced these sample runs:
 
 ```text
-v1: 285 ms, 184 ms, 180 ms
-v2: 83 ms, 81 ms, 77 ms
-v3: 66 ms, 63 ms, 63 ms
-v4: 300 ms, 295 ms, 305 ms
-v5: 64 ms, 63 ms, 63 ms
+v1: 214 ms, 214 ms, 214 ms
+v2: 93 ms, 93 ms, 93 ms
+v3: 69 ms, 69 ms, 69 ms
+v4: 319 ms, 319 ms, 319 ms
+v5: 64 ms, 64 ms, 64 ms
+v6: 327 ms, 327 ms, 327 ms
+v7: 315 ms, 315 ms, 315 ms
+v8: 1165 ms, 1165 ms, 1165 ms
+v9: 327 ms, 327 ms, 327 ms
 ```
 
-All runs reported 0 mismatches. Median timings were 184 ms for v1, 81 ms for
-v2, 63 ms for v3, 300 ms for v4, and 63 ms for v5. v5 was about 4.6x faster
-than v4. v4 confirms that avoiding every intermediate matrix is not enough by
-itself; the tile layout and amount of work reused per block matter heavily for
-this benchmark.
+All runs reported 0 mismatches. On this device, v6–v9 are all correct.
 
 ## Build
 

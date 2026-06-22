@@ -81,6 +81,10 @@ void MATCH() {
     BenchmarkResult v3 = RunBenchmark("v3", MatchV3, lhs, rhs, expected_match);
     BenchmarkResult v4 = RunBenchmark("v4", MatchV4, lhs, rhs, expected_match);
     BenchmarkResult v5 = RunBenchmark("v5", MatchV5, lhs, rhs, expected_match);
+    BenchmarkResult v6 = RunBenchmark("v6", MatchV6, lhs, rhs, expected_match);
+    BenchmarkResult v7 = RunBenchmark("v7", MatchV7, lhs, rhs, expected_match);
+    BenchmarkResult v8 = RunBenchmark("v8", MatchV8, lhs, rhs, expected_match);
+    BenchmarkResult v9 = RunBenchmark("v9", MatchV9, lhs, rhs, expected_match);
 
     if (v1.success && v2.success && v1.mismatch_count == 0 && v2.mismatch_count == 0 && v2.elapsed_ms > 0) {
         double speedup = static_cast<double>(v1.elapsed_ms) / static_cast<double>(v2.elapsed_ms);
@@ -113,6 +117,30 @@ void MATCH() {
     if (v3.success && v5.success && v3.mismatch_count == 0 && v5.mismatch_count == 0 && v5.elapsed_ms > 0) {
         double speedup = static_cast<double>(v3.elapsed_ms) / static_cast<double>(v5.elapsed_ms);
         std::cout << "v5 speedup over v3 : " << speedup << "x" << std::endl;
+    }
+    if (v4.success && v6.success && v4.mismatch_count == 0 && v6.mismatch_count == 0 && v6.elapsed_ms > 0) {
+        double speedup = static_cast<double>(v4.elapsed_ms) / static_cast<double>(v6.elapsed_ms);
+        std::cout << "v6 speedup over v4 : " << speedup << "x" << std::endl;
+    }
+    if (v5.success && v6.success && v5.mismatch_count == 0 && v6.mismatch_count == 0 && v6.elapsed_ms > 0) {
+        double speedup = static_cast<double>(v5.elapsed_ms) / static_cast<double>(v6.elapsed_ms);
+        std::cout << "v6 speedup over v5 : " << speedup << "x" << std::endl;
+    }
+    if (v6.success && v7.success && v6.mismatch_count == 0 && v7.mismatch_count == 0 && v7.elapsed_ms > 0) {
+        double speedup = static_cast<double>(v6.elapsed_ms) / static_cast<double>(v7.elapsed_ms);
+        std::cout << "v7 speedup over v6 : " << speedup << "x" << std::endl;
+    }
+    if (v6.success && v8.success && v6.mismatch_count == 0 && v8.mismatch_count == 0 && v8.elapsed_ms > 0) {
+        double speedup = static_cast<double>(v6.elapsed_ms) / static_cast<double>(v8.elapsed_ms);
+        std::cout << "v8 speedup over v6 : " << speedup << "x" << std::endl;
+    }
+    if (v8.success && v9.success && v8.mismatch_count == 0 && v9.mismatch_count == 0 && v9.elapsed_ms > 0) {
+        double speedup = static_cast<double>(v8.elapsed_ms) / static_cast<double>(v9.elapsed_ms);
+        std::cout << "v9 speedup over v8 : " << speedup << "x" << std::endl;
+    }
+    if (v6.success && v9.success && v6.mismatch_count == 0 && v9.mismatch_count == 0 && v9.elapsed_ms > 0) {
+        double speedup = static_cast<double>(v6.elapsed_ms) / static_cast<double>(v9.elapsed_ms);
+        std::cout << "v9 speedup over v6 : " << speedup << "x" << std::endl;
     }
 }
 int main(int argc, char** argv) {
