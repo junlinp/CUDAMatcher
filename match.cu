@@ -318,6 +318,46 @@ __global__ void ComputeNearestNeighborV3(float* pts1, float* pts2, float* score,
 	}
 }
 
+__global__ void ComputeNearestNeighborV4(float* pts1, float* pts2, float* score, int* index, int WIDTH) {
+	int lane = threadIdx.x & 31;
+	int warp = threadIdx.x >> 5;
+	int p1 = blockIdx.x * 8 + warp;
+	if (p1 >= WIDTH) {
+		return;
+	}
+
+	float best_score = 1e30f;
+	int best_index = -1;
+	float4* pts1_vec = (float4*)pts1;
+	float4* pts2_vec = (float4*)pts2;
+
+	for (int p2 = lane; p2 < WIDTH; p2 += 32) {
+		float d = 0.0f;
+		for (int k = 0; k < 32; k++) {
+			float4 v1 = pts1_vec[p1 * 32 + k];
+			float4 v2 = pts2_vec[p2 * 32 + k];
+			float a = v1.x - v2.x;
+			d += a * a;
+			a = v1.y - v2.y;
+			d += a * a;
+			a = v1.z - v2.z;
+			d += a * a;
+			a = v1.w - v2.w;
+			d += a * a;
+		}
+		if (d < best_score) {
+			best_score = d;
+			best_index = p2;
+		}
+	}
+
+	WarpReduceMin(best_score, best_index);
+	if (lane == 0) {
+		score[p1] = best_score;
+		index[p1] = best_index;
+	}
+}
+
 #define CUDAErrorCheck(x) ErrorCheckImp((x), __FILE__, __LINE__)
 
 bool ErrorCheckImp(cudaError_t code, const char* file_name, const int line) {
@@ -490,6 +530,62 @@ bool MatchV3(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 	if (!CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size))) goto cleanup;
 
 	ComputeNearestNeighborV3<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, device_score, device_index, size);
+	if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost))) goto cleanup;
+
+	for (int i = 0; i < size; i++) {
+		std::pair<int, int> p(i, host_index[i]);
+		match_result.push_back(p);
+	}
+	success = true;
+
+cleanup:
+	if (lhs_descriptor_host) cudaFreeHost(lhs_descriptor_host);
+	if (rhs_descriptor_host) cudaFreeHost(rhs_descriptor_host);
+	if (lhs_descriptor_device) cudaFree(lhs_descriptor_device);
+	if (rhs_descriptor_device) cudaFree(rhs_descriptor_device);
+	if (device_score) cudaFree(device_score);
+	if (device_index) cudaFree(device_index);
+	if (host_index) cudaFreeHost(host_index);
+	if (!success) match_result.clear();
+	return success;
+}
+
+bool MatchV4(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
+
+	size_t size = lhs.size();
+	if (size == 0 || size != rhs.size() || size % 8 != 0) {
+		fprintf(stderr, "ERROR Checked : invalid descriptor sizes\n");
+		return false;
+	}
+	match_result.clear();
+
+	float* lhs_descriptor_host = nullptr;
+	float* rhs_descriptor_host = nullptr;
+	float* lhs_descriptor_device = nullptr;
+	float* rhs_descriptor_device = nullptr;
+	float* device_score = nullptr;
+	int* host_index = nullptr;
+	int* device_index = nullptr;
+	dim3 thread(256, 1);
+	dim3 block(size / 8, 1);
+	bool success = false;
+
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
+	CopyDescriptorToPinnedMemory(lhs, lhs_descriptor_host);
+	CopyDescriptorToPinnedMemory(rhs, rhs_descriptor_host);
+
+	if (!CUDAErrorCheck(cudaMalloc(&lhs_descriptor_device, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+
+	if (!CUDAErrorCheck(cudaMallocHost(&host_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size))) goto cleanup;
+
+	ComputeNearestNeighborV4<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, device_score, device_index, size);
 	if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
 	if (!CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost))) goto cleanup;
 
