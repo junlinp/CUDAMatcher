@@ -21,6 +21,9 @@ bool MatchV2(...);
 bool MatchV3(...);
 bool MatchV4(...);
 bool MatchV5(...);
+bool MatchV5a(...);
+bool MatchV5b(...);
+bool MatchV5c(...);
 bool MatchV6(...);
 bool MatchV7(...);
 bool MatchV8(...);
@@ -42,10 +45,14 @@ bool MatchV9(...);
   the 8 left descriptors owned by a block and each 32-descriptor right tile. It
   does not allocate a full pairwise distance matrix or a per-tile score matrix;
   each warp keeps only the current best distance/index for one left descriptor.
-- `v5`: optimized no-distance-matrix matcher. It keeps the current best
-  distance/index like v4, but uses the tiled warp-reduction path from v3 to
-  increase useful work per shared-memory tile. `Match(...)` currently defaults
-  to v5.
+- `v5`: alias of `v5c` for current default matcher.
+- `v5a`: based on `ComputeNearestNeighborV3` and preserves the original
+  shared-matrix transposition flow.
+- `v5b`: keeps explicit `32 × 32` tiling and the shared-matrix flow,
+  but is separated as its own kernel variant.
+- `v5c`: a register-first rewrite of the v5 path, with direct `float4` loads
+  into registers, simplified lane-per-row reduction logic, and reduced shared
+  transposition.
 - `v6`: tiled top-1 matcher. For each block, shared-memory tiles for right
   descriptors are loaded one-by-one and each warp directly maintains the current
   best index/distance, still without building an `N x N` matrix.
@@ -68,7 +75,10 @@ v1: 214 ms, 214 ms, 214 ms
 v2: 93 ms, 93 ms, 93 ms
 v3: 69 ms, 69 ms, 69 ms
 v4: 319 ms, 319 ms, 319 ms
-v5: 64 ms, 64 ms, 64 ms
+v5a: 60 ms, 60 ms, 60 ms
+v5b: 63 ms, 63 ms, 63 ms
+v5c: 99 ms, 99 ms, 99 ms
+v5: 96 ms, 96 ms, 96 ms
 v6: 327 ms, 327 ms, 327 ms
 v7: 315 ms, 315 ms, 315 ms
 v8: 1165 ms, 1165 ms, 1165 ms
@@ -97,8 +107,8 @@ Run the matcher benchmark:
 ./build/CUDA_MATCH
 ```
 
-The benchmark generates one descriptor set and compares v1 through v5 on the
-same data.
+The benchmark generates one descriptor set and compares v1 through v9 (including
+v5a/v5b/v5c) on the same data.
 
 Run the GEMM tests:
 

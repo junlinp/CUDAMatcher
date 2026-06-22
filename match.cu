@@ -322,6 +322,346 @@ __global__ void ComputeNearestNeighborV3(float* pts1, float* pts2, float* score,
 	}
 }
 
+__global__ void ComputeNearestNeighborV5a(float* pts1, float* pts2, float* score, int* index, int WIDTH) {
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int p1_base = blockIdx.x * blockDim.x;
+	__shared__ float4 buffer_pts1[32 * 32];
+	__shared__ float4 buffer_pts2[32 * 32];
+	__shared__ float score_buffer[32 * 32];
+	__shared__ float rotation_score[32 * 32];
+	__shared__ float best_score[32];
+	__shared__ int best_index[32];
+
+	const float4* pts1_vec = (const float4*)pts1;
+	const float4* pts2_vec = (const float4*)pts2;
+
+	for (int i = 0; i < 4; i++) {
+		buffer_pts1[(ty * 4 + i) * 32 + tx] = pts1_vec[(p1_base + ty * 4 + i) * 32 + tx];
+		if (tx == 0) {
+			int row = 4 * ty + i;
+			best_score[row] = 1e30f;
+			best_index[row] = -1;
+		}
+	}
+	__syncthreads();
+
+	for (int p2 = 0; p2 < WIDTH; p2 += 32) {
+		for (int i = 0; i < 4; i++) {
+			buffer_pts2[(ty * 4 + i) * 32 + tx] = pts2_vec[(p2 + ty * 4 + i) * 32 + tx];
+		}
+		__syncthreads();
+		if (ty < 4) {
+			float ss[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+			for (int i = 0; i < 32; i++) {
+				float4 v1[2];
+				for (int dx = 0; dx < 2; dx++) {
+					v1[dx] = buffer_pts1[(16 * dx + tx) % 32 * 32 + (i + tx) % 32];
+				}
+
+				for (int dy = 0; dy < 4; dy++) {
+					float4 pt2 = buffer_pts2[(4 * (2 * ty + tx / 16) + dy) * 32 + (i + tx) % 32];
+					float a = pt2.x - v1[0].x;
+					ss[dy] += a * a;
+					a = pt2.y - v1[0].y;
+					ss[dy] += a * a;
+					a = pt2.z - v1[0].z;
+					ss[dy] += a * a;
+					a = pt2.w - v1[0].w;
+					ss[dy] += a * a;
+
+					a = pt2.x - v1[1].x;
+					ss[4 + dy] += a * a;
+					a = pt2.y - v1[1].y;
+					ss[4 + dy] += a * a;
+					a = pt2.z - v1[1].z;
+					ss[4 + dy] += a * a;
+					a = pt2.w - v1[1].w;
+					ss[4 + dy] += a * a;
+				}
+			}
+			for (int dy = 0; dy < 4; dy++) {
+				for (int dx = 0; dx < 2; dx++) {
+					int row = (tx + 16 * dx) % 32;
+					int col = ( 4 * (2 * ty + tx / 16) + dy);
+					score_buffer[row + 32 * col] = ss[dx * 4 + dy];
+				}
+			}
+		}
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			rotation_score[(tx + ( 4 * ty + i)) % 32 + 32 * (4 * ty + i)] = score_buffer[tx + 32 * (4 * ty + i)];
+		}
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			int row = 4 * ty + i;
+			float tile_best_score = rotation_score[tx * 32 + (row + tx) % 32];
+			int tile_best_index = p2 + tx;
+			WarpReduceMin(tile_best_score, tile_best_index);
+			if (tx == 0 && tile_best_score < best_score[row]) {
+				best_score[row] = tile_best_score;
+				best_index[row] = tile_best_index;
+			}
+		}
+		__syncthreads();
+	}
+
+	if (tx == 0) {
+		for (int i = 0; i < 4; i++) {
+			int row = 4 * ty + i;
+			int p1 = p1_base + row;
+			score[p1] = best_score[row];
+			index[p1] = best_index[row];
+		}
+	}
+}
+
+__global__ void ComputeNearestNeighborV5c(float* pts1, float* pts2, float* score, int* index, int WIDTH) {
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int p1_base = blockIdx.x * blockDim.x;
+	const int p1_start = p1_base + ty * 4;
+
+	__shared__ float4 buffer_pts1[32 * 32];
+	__shared__ float4 buffer_pts2[32 * 32];
+
+	const float4* pts1_vec = (const float4*)pts1;
+	const float4* pts2_vec = (const float4*)pts2;
+
+	#pragma unroll
+	for (int i = 0; i < 4; i++) {
+		buffer_pts1[(ty * 4 + i) * 32 + tx] = pts1_vec[(p1_start + i) * 32 + tx];
+	}
+	__syncthreads();
+
+	float best0 = 1e30f;
+	float best1 = 1e30f;
+	float best2 = 1e30f;
+	float best3 = 1e30f;
+	int best_index0 = -1;
+	int best_index1 = -1;
+	int best_index2 = -1;
+	int best_index3 = -1;
+
+	for (int p2_base = 0; p2_base < WIDTH; p2_base += 32) {
+		int linear = threadIdx.x + threadIdx.y * blockDim.x;
+		for (int item = linear; item < 32 * 32; item += blockDim.x * blockDim.y) {
+			int p2_offset = item / 32;
+			int k = item % 32;
+			buffer_pts2[item] = pts2_vec[(p2_base + p2_offset) * 32 + k];
+		}
+		__syncthreads();
+
+		float d0 = 0.0f;
+		float d1 = 0.0f;
+		float d2 = 0.0f;
+		float d3 = 0.0f;
+		if (p2_base + tx < WIDTH) {
+			for (int k = 0; k < 32; k++) {
+				float4 lhs0 = buffer_pts1[(ty * 4 + 0) * 32 + k];
+				float4 lhs1 = buffer_pts1[(ty * 4 + 1) * 32 + k];
+				float4 lhs2 = buffer_pts1[(ty * 4 + 2) * 32 + k];
+				float4 lhs3 = buffer_pts1[(ty * 4 + 3) * 32 + k];
+				float4 rhs0 = buffer_pts2[tx * 32 + k];
+
+				float a = lhs0.x - rhs0.x;
+				d0 += a * a;
+				a = lhs0.y - rhs0.y;
+				d0 += a * a;
+				a = lhs0.z - rhs0.z;
+				d0 += a * a;
+				a = lhs0.w - rhs0.w;
+				d0 += a * a;
+
+				a = lhs1.x - rhs0.x;
+				d1 += a * a;
+				a = lhs1.y - rhs0.y;
+				d1 += a * a;
+				a = lhs1.z - rhs0.z;
+				d1 += a * a;
+				a = lhs1.w - rhs0.w;
+				d1 += a * a;
+
+				a = lhs2.x - rhs0.x;
+				d2 += a * a;
+				a = lhs2.y - rhs0.y;
+				d2 += a * a;
+				a = lhs2.z - rhs0.z;
+				d2 += a * a;
+				a = lhs2.w - rhs0.w;
+				d2 += a * a;
+
+				a = lhs3.x - rhs0.x;
+				d3 += a * a;
+				a = lhs3.y - rhs0.y;
+				d3 += a * a;
+				a = lhs3.z - rhs0.z;
+				d3 += a * a;
+				a = lhs3.w - rhs0.w;
+				d3 += a * a;
+			}
+		}
+
+		int tile_index = p2_base + tx;
+		float tile_best0 = d0;
+		float tile_best1 = d1;
+		float tile_best2 = d2;
+		float tile_best3 = d3;
+		int tile_index0 = tile_index;
+		int tile_index1 = tile_index;
+		int tile_index2 = tile_index;
+		int tile_index3 = tile_index;
+		if (p2_base + tx >= WIDTH) {
+			tile_best0 = 1e30f;
+			tile_best1 = 1e30f;
+			tile_best2 = 1e30f;
+			tile_best3 = 1e30f;
+			tile_index0 = -1;
+			tile_index1 = -1;
+			tile_index2 = -1;
+			tile_index3 = -1;
+		}
+
+		WarpReduceMin(tile_best0, tile_index0);
+		WarpReduceMin(tile_best1, tile_index1);
+		WarpReduceMin(tile_best2, tile_index2);
+		WarpReduceMin(tile_best3, tile_index3);
+		if (tx == 0) {
+			if (tile_best0 < best0) {
+				best0 = tile_best0;
+				best_index0 = tile_index0;
+			}
+			if (tile_best1 < best1) {
+				best1 = tile_best1;
+				best_index1 = tile_index1;
+			}
+			if (tile_best2 < best2) {
+				best2 = tile_best2;
+				best_index2 = tile_index2;
+			}
+			if (tile_best3 < best3) {
+				best3 = tile_best3;
+				best_index3 = tile_index3;
+			}
+		}
+		__syncthreads();
+	}
+
+	if (tx == 0) {
+		if (p1_start + 0 < WIDTH) {
+			score[p1_start + 0] = best0;
+			index[p1_start + 0] = best_index0;
+		}
+		if (p1_start + 1 < WIDTH) {
+			score[p1_start + 1] = best1;
+			index[p1_start + 1] = best_index1;
+		}
+		if (p1_start + 2 < WIDTH) {
+			score[p1_start + 2] = best2;
+			index[p1_start + 2] = best_index2;
+		}
+		if (p1_start + 3 < WIDTH) {
+			score[p1_start + 3] = best3;
+			index[p1_start + 3] = best_index3;
+		}
+	}
+}
+
+__global__ void ComputeNearestNeighborV5b(float* pts1, float* pts2, float* score, int* index, int WIDTH) {
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int p1_base = blockIdx.x * blockDim.x;
+	const float4* pts1_vec = (const float4*)pts1;
+	const float4* pts2_vec = (const float4*)pts2;
+
+	__shared__ float4 buffer_pts1[32 * 32];
+	__shared__ float4 buffer_pts2[32 * 32];
+	__shared__ float score_buffer[32 * 32];
+	__shared__ float rotation_score[32 * 32];
+	__shared__ float best_score[32];
+	__shared__ int best_index[32];
+
+	for (int i = 0; i < 4; i++) {
+		buffer_pts1[(ty * 4 + i) * 32 + tx] = pts1_vec[(p1_base + ty * 4 + i) * 32 + tx];
+		if (tx == 0) {
+			int row = 4 * ty + i;
+			best_score[row] = 1e30f;
+			best_index[row] = -1;
+		}
+	}
+	__syncthreads();
+
+	for (int p2 = 0; p2 < WIDTH; p2 += 32) {
+		for (int i = 0; i < 4; i++) {
+			buffer_pts2[(ty * 4 + i) * 32 + tx] = pts2_vec[(p2 + ty * 4 + i) * 32 + tx];
+		}
+		__syncthreads();
+		if (ty < 4) {
+			float ss[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+			for (int i = 0; i < 32; i++) {
+				float4 v1[2];
+				#pragma unroll
+				for (int dx = 0; dx < 2; dx++) {
+					v1[dx] = buffer_pts1[(16 * dx + tx) % 32 * 32 + (i + tx) % 32];
+				}
+
+				for (int dy = 0; dy < 4; dy++) {
+					float4 pt2 = buffer_pts2[(4 * (2 * ty + tx / 16) + dy) * 32 + (i + tx) % 32];
+					float a = pt2.x - v1[0].x;
+					ss[dy] += a * a;
+					a = pt2.y - v1[0].y;
+					ss[dy] += a * a;
+					a = pt2.z - v1[0].z;
+					ss[dy] += a * a;
+					a = pt2.w - v1[0].w;
+					ss[dy] += a * a;
+
+					a = pt2.x - v1[1].x;
+					ss[4 + dy] += a * a;
+					a = pt2.y - v1[1].y;
+					ss[4 + dy] += a * a;
+					a = pt2.z - v1[1].z;
+					ss[4 + dy] += a * a;
+					a = pt2.w - v1[1].w;
+					ss[4 + dy] += a * a;
+				}
+			}
+			for (int dy = 0; dy < 4; dy++) {
+				for (int dx = 0; dx < 2; dx++) {
+					int row = (tx + 16 * dx) % 32;
+					int col = (4 * (2 * ty + tx / 16) + dy);
+					score_buffer[row + 32 * col] = ss[dx * 4 + dy];
+				}
+			}
+		}
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			rotation_score[(tx + (4 * ty + i)) % 32 + 32 * (4 * ty + i)] = score_buffer[tx + 32 * (4 * ty + i)];
+		}
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			int row = 4 * ty + i;
+			float tile_best_score = rotation_score[tx * 32 + (row + tx) % 32];
+			int tile_best_index = p2 + tx;
+			WarpReduceMin(tile_best_score, tile_best_index);
+			if (tx == 0 && tile_best_score < best_score[row]) {
+				best_score[row] = tile_best_score;
+				best_index[row] = tile_best_index;
+			}
+		}
+		__syncthreads();
+	}
+
+	if (tx == 0) {
+		for (int i = 0; i < 4; i++) {
+			int row = 4 * ty + i;
+			int p1 = p1_base + row;
+			score[p1] = best_score[row];
+			index[p1] = best_index[row];
+		}
+	}
+}
+
 __global__ void ComputeNearestNeighborV4(float* pts1, float* pts2, float* score, int* index, int WIDTH) {
 	int lane = threadIdx.x & 31;
 	int warp = threadIdx.x >> 5;
@@ -832,7 +1172,8 @@ cleanup:
 	return success;
 }
 
-bool MatchV5(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
+template <typename KernelFn>
+bool MatchV5WithKernel(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result, KernelFn kernel) {
 
 	size_t size = lhs.size();
 	if (size == 0 || size != rhs.size() || size % 32 != 0) {
@@ -866,7 +1207,7 @@ bool MatchV5(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 	if (!CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size))) goto cleanup;
 
-	ComputeNearestNeighborV3<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, device_score, device_index, size);
+	kernel<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, device_score, device_index, size);
 	if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
 	if (!CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost))) goto cleanup;
 
@@ -886,6 +1227,22 @@ cleanup:
 	if (host_index) cudaFreeHost(host_index);
 	if (!success) match_result.clear();
 	return success;
+}
+
+bool MatchV5a(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
+	return MatchV5WithKernel(lhs, rhs, match_result, ComputeNearestNeighborV5a);
+}
+
+bool MatchV5b(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
+	return MatchV5WithKernel(lhs, rhs, match_result, ComputeNearestNeighborV5b);
+}
+
+bool MatchV5c(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
+	return MatchV5WithKernel(lhs, rhs, match_result, ComputeNearestNeighborV5c);
+}
+
+bool MatchV5(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
+	return MatchV5c(lhs, rhs, match_result);
 }
 
 bool MatchV6(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {

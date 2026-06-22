@@ -81,6 +81,9 @@ void MATCH() {
     BenchmarkResult v3 = RunBenchmark("v3", MatchV3, lhs, rhs, expected_match);
     BenchmarkResult v4 = RunBenchmark("v4", MatchV4, lhs, rhs, expected_match);
     BenchmarkResult v5 = RunBenchmark("v5", MatchV5, lhs, rhs, expected_match);
+    BenchmarkResult v5a = RunBenchmark("v5a", MatchV5a, lhs, rhs, expected_match);
+    BenchmarkResult v5b = RunBenchmark("v5b", MatchV5b, lhs, rhs, expected_match);
+    BenchmarkResult v5c = RunBenchmark("v5c", MatchV5c, lhs, rhs, expected_match);
     BenchmarkResult v6 = RunBenchmark("v6", MatchV6, lhs, rhs, expected_match);
     BenchmarkResult v7 = RunBenchmark("v7", MatchV7, lhs, rhs, expected_match);
     BenchmarkResult v8 = RunBenchmark("v8", MatchV8, lhs, rhs, expected_match);
@@ -117,6 +120,18 @@ void MATCH() {
     if (v3.success && v5.success && v3.mismatch_count == 0 && v5.mismatch_count == 0 && v5.elapsed_ms > 0) {
         double speedup = static_cast<double>(v3.elapsed_ms) / static_cast<double>(v5.elapsed_ms);
         std::cout << "v5 speedup over v3 : " << speedup << "x" << std::endl;
+    }
+    if (v5.success && v5a.success && v5.mismatch_count == 0 && v5a.mismatch_count == 0 && v5a.elapsed_ms > 0) {
+        double speedup = static_cast<double>(v5.elapsed_ms) / static_cast<double>(v5a.elapsed_ms);
+        std::cout << "v5a speedup over v5 : " << speedup << "x" << std::endl;
+    }
+    if (v5a.success && v5b.success && v5a.mismatch_count == 0 && v5b.mismatch_count == 0 && v5b.elapsed_ms > 0) {
+        double speedup = static_cast<double>(v5a.elapsed_ms) / static_cast<double>(v5b.elapsed_ms);
+        std::cout << "v5b speedup over v5a : " << speedup << "x" << std::endl;
+    }
+    if (v5b.success && v5c.success && v5b.mismatch_count == 0 && v5c.mismatch_count == 0 && v5c.elapsed_ms > 0) {
+        double speedup = static_cast<double>(v5b.elapsed_ms) / static_cast<double>(v5c.elapsed_ms);
+        std::cout << "v5c speedup over v5b : " << speedup << "x" << std::endl;
     }
     if (v4.success && v6.success && v4.mismatch_count == 0 && v6.mismatch_count == 0 && v6.elapsed_ms > 0) {
         double speedup = static_cast<double>(v4.elapsed_ms) / static_cast<double>(v6.elapsed_ms);
