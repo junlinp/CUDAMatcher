@@ -20,6 +20,7 @@ bool MatchV1(...);
 bool MatchV2(...);
 bool MatchV3(...);
 bool MatchV4(...);
+bool MatchV5(...);
 ```
 
 `Descriptor` is `std::array<float, 128>`. The current CUDA matcher expects
@@ -37,6 +38,10 @@ bool MatchV4(...);
   the 8 left descriptors owned by a block and each 32-descriptor right tile. It
   does not allocate a full pairwise distance matrix or a per-tile score matrix;
   each warp keeps only the current best distance/index for one left descriptor.
+- `v5`: optimized no-distance-matrix matcher. It keeps the current best
+  distance/index like v4, but uses the tiled warp-reduction path from v3 to
+  increase useful work per shared-memory tile. `Match(...)` currently defaults
+  to v5.
 
 On an NVIDIA GeForce RTX 3050 Ti Laptop GPU, the matcher benchmark for
 `16,384 x 16,384` descriptors produced these sample runs:
@@ -46,13 +51,14 @@ v1: 285 ms, 184 ms, 180 ms
 v2: 83 ms, 81 ms, 77 ms
 v3: 66 ms, 63 ms, 63 ms
 v4: 300 ms, 295 ms, 305 ms
+v5: 64 ms, 63 ms, 63 ms
 ```
 
 All runs reported 0 mismatches. Median timings were 184 ms for v1, 81 ms for
-v2, 63 ms for v3, and 300 ms for v4. On that run, v3 was 2.9x faster than v1
-and 1.29x faster than v2. v4 confirms that avoiding every intermediate matrix
-is not enough by itself; the tile layout and amount of work reused per block
-matter heavily for this benchmark.
+v2, 63 ms for v3, 300 ms for v4, and 63 ms for v5. v5 was about 4.6x faster
+than v4. v4 confirms that avoiding every intermediate matrix is not enough by
+itself; the tile layout and amount of work reused per block matter heavily for
+this benchmark.
 
 ## Build
 
@@ -74,8 +80,8 @@ Run the matcher benchmark:
 ./build/CUDA_MATCH
 ```
 
-The benchmark generates one descriptor set and compares v1, v2, v3, and v4 on
-the same data.
+The benchmark generates one descriptor set and compares v1 through v5 on the
+same data.
 
 Run the GEMM tests:
 

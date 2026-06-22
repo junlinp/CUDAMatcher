@@ -10,6 +10,7 @@ bool MatchV1(const std::vector< Descriptor>& lhs,const std::vector<Descriptor>& 
 bool MatchV2(const std::vector< Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result);
 bool MatchV3(const std::vector< Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result);
 bool MatchV4(const std::vector< Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result);
+bool MatchV5(const std::vector< Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result);
 bool Match(const std::vector< Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result);
 
 #endif  // MATCH_H_
