@@ -4,8 +4,8 @@
 #include <cstdint>
 #include <vector>
 #include "cuda_runtime.h"
-#include "cublas_v2.h"
 #include "cuda_fp16.h"
+#include <mma.h>
 
 __global__ void ComputeDistanceMatrixV1(float* pts1, float* pts2, float* distance_matrix, int WIDTH) {
 	int tx = threadIdx.x;
@@ -923,57 +923,114 @@ __global__ void ComputeNearestNeighborV7(const float* pts1, const float* pts2, f
 	}
 }
 
-__global__ void ComputeNearestNeighborV8(const uint8_t* pts1, const uint8_t* pts2, float* score, int* index, int WIDTH) {
-	int lane = threadIdx.x;
-	int warp = threadIdx.y;
-	int p1 = blockIdx.x * blockDim.y + warp;
-	bool valid = p1 < WIDTH;
+__global__ void ComputeNearestNeighborV8(const __half* pts1, const __half* pts2, float* score, int* index, int WIDTH) {
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int p1_base = blockIdx.x * blockDim.x;
+	const __half2* pts1_vec = (const __half2*)pts1;
+	const __half2* pts2_vec = (const __half2*)pts2;
 
-	__shared__ uint8_t buffer_pts1[4 * 128];
-	__shared__ uint8_t buffer_pts2[32 * 128];
-	if (lane < 32) {
-		for (int k = lane; k < 128; k += 32) {
-			buffer_pts1[warp * 128 + k] = valid ? pts1[p1 * 128 + k] : 0;
-		}
+	__shared__ __half2 buffer_pts1[32 * 64];
+	__shared__ __half2 buffer_pts2[32 * 64];
+	__shared__ float score_buffer[32 * 32];
+	__shared__ float rotation_score[32 * 32];
+
+	float best0 = 1e30f;
+	float best1 = 1e30f;
+	float best2 = 1e30f;
+	float best3 = 1e30f;
+	int best_index0 = -1;
+	int best_index1 = -1;
+	int best_index2 = -1;
+	int best_index3 = -1;
+
+	for (int i = 0; i < 4; i++) {
+		int row = ty * 4 + i;
+		buffer_pts1[row * 64 + tx] = pts1_vec[(p1_base + row) * 64 + tx];
+		buffer_pts1[row * 64 + tx + 32] = pts1_vec[(p1_base + row) * 64 + tx + 32];
 	}
 	__syncthreads();
 
-	float best_score = 1e30f;
-	int best_index = -1;
-	for (int p2_base = 0; p2_base < WIDTH; p2_base += 32) {
-		int linear = lane + threadIdx.y * blockDim.x;
-		for (int item = linear; item < 32 * 128; item += blockDim.x * blockDim.y) {
-			int p2_offset = item / 128;
-			int k = item % 128;
-			buffer_pts2[item] = pts2[(p2_base + p2_offset) * 128 + k];
+	for (int p2 = 0; p2 < WIDTH; p2 += 32) {
+		for (int i = 0; i < 4; i++) {
+			int row = ty * 4 + i;
+			buffer_pts2[row * 64 + tx] = pts2_vec[(p2 + row) * 64 + tx];
+			buffer_pts2[row * 64 + tx + 32] = pts2_vec[(p2 + row) * 64 + tx + 32];
 		}
 		__syncthreads();
+		if (ty < 4) {
+			float ss[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+			for (int i = 0; i < 64; i++) {
+				__half2 v1[2];
+				#pragma unroll
+				for (int dx = 0; dx < 2; dx++) {
+					v1[dx] = buffer_pts1[((16 * dx + tx) % 32) * 64 + ((i + tx) % 64)];
+				}
 
-		float d = 1e30f;
-		if (valid && p2_base + lane < WIDTH) {
-			int dist = 0;
-			int base = lane * 128;
-			const uint8_t* lhs_ptr = &buffer_pts1[warp * 128];
-			const uint8_t* rhs_ptr = &buffer_pts2[base];
-			for (int k = 0; k < 128; k++) {
-				int delta = int(lhs_ptr[k]) - int(rhs_ptr[k]);
-				dist += delta * delta;
+				for (int dy = 0; dy < 4; dy++) {
+					__half2 pt2 = buffer_pts2[(4 * (2 * ty + tx / 16) + dy) * 64 + ((i + tx) % 64)];
+					float2 rhs2 = __half22float2(pt2);
+					float2 lhs0 = __half22float2(v1[0]);
+					float2 lhs1 = __half22float2(v1[1]);
+
+					float a = rhs2.x - lhs0.x;
+					ss[dy] += a * a;
+					a = rhs2.y - lhs0.y;
+					ss[dy] += a * a;
+
+					a = rhs2.x - lhs1.x;
+					ss[4 + dy] += a * a;
+					a = rhs2.y - lhs1.y;
+					ss[4 + dy] += a * a;
+				}
 			}
-			d = static_cast<float>(dist);
+			for (int dy = 0; dy < 4; dy++) {
+				for (int dx = 0; dx < 2; dx++) {
+					int row = (tx + 16 * dx) % 32;
+					int col = 4 * (2 * ty + tx / 16) + dy;
+					score_buffer[row + 32 * col] = ss[dx * 4 + dy];
+				}
+			}
 		}
-		if (d < best_score) {
-			best_score = d;
-			best_index = p2_base + lane;
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			rotation_score[(tx + (4 * ty + i)) % 32 + 32 * (4 * ty + i)] = score_buffer[tx + 32 * (4 * ty + i)];
+		}
+		__syncthreads();
+		for (int i = 0; i < 4; i++) {
+			int row = 4 * ty + i;
+			float tile_best_score = rotation_score[tx * 32 + (row + tx) % 32];
+			int tile_best_index = p2 + tx;
+			WarpReduceMin(tile_best_score, tile_best_index);
+			if (tx == 0) {
+				if (i == 0 && tile_best_score < best0) {
+					best0 = tile_best_score;
+					best_index0 = tile_best_index;
+				} else if (i == 1 && tile_best_score < best1) {
+					best1 = tile_best_score;
+					best_index1 = tile_best_index;
+				} else if (i == 2 && tile_best_score < best2) {
+					best2 = tile_best_score;
+					best_index2 = tile_best_index;
+				} else if (i == 3 && tile_best_score < best3) {
+					best3 = tile_best_score;
+					best_index3 = tile_best_index;
+				}
+			}
 		}
 		__syncthreads();
 	}
 
-	if (valid) {
-		WarpReduceMin(best_score, best_index);
-		if (lane == 0) {
-			score[p1] = best_score;
-			index[p1] = best_index;
-		}
+	if (tx == 0) {
+		int p1_start = p1_base + ty * 4;
+		score[p1_start + 0] = best0;
+		index[p1_start + 0] = best_index0;
+		score[p1_start + 1] = best1;
+		index[p1_start + 1] = best_index1;
+		score[p1_start + 2] = best2;
+		index[p1_start + 2] = best_index2;
+		score[p1_start + 3] = best3;
+		index[p1_start + 3] = best_index3;
 	}
 }
 
@@ -1005,15 +1062,57 @@ __global__ void ComputeTop1FromDotV9(const float* dots, const float* lhs_norm, c
 	}
 }
 
-static inline bool CublasErrorCheckImp(cublasStatus_t code, const char* file_name, const int line) {
-	if (code != CUBLAS_STATUS_SUCCESS) {
-		fprintf(stderr, "ERROR Checked : cuBLAS error (code=%d) in %s %d\n", static_cast<int>(code), file_name, line);
-		return false;
-	}
-	return true;
-}
+__global__ void ComputeNearestNeighborV9WMMA(const __half* pts1, const __half* pts2, const float* lhs_norm, const float* rhs_norm, float* score, int* index, int WIDTH) {
+	using namespace nvcuda;
+	int lane = threadIdx.x;
+	int a_base = blockIdx.x * 16;
+	int row = lane;
 
-#define CUBLASErrorCheck(x) CublasErrorCheckImp((x), __FILE__, __LINE__)
+	__shared__ float dot_tile[16 * 16];
+	float best_score = 1e30f;
+	int best_index = -1;
+	float lhs_norm_value = 0.0f;
+	if (row < 16 && a_base + row < WIDTH) {
+		lhs_norm_value = lhs_norm[a_base + row];
+	}
+
+	for (int b_base = 0; b_base < WIDTH; b_base += 16) {
+		wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+		wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+		wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc_frag;
+		wmma::fill_fragment(acc_frag, 0.0f);
+
+		for (int k = 0; k < 128; k += 16) {
+			const __half* a_ptr = pts1 + a_base * 128 + k;
+			const __half* b_ptr = pts2 + b_base * 128 + k;
+			wmma::load_matrix_sync(a_frag, a_ptr, 128);
+			wmma::load_matrix_sync(b_frag, b_ptr, 128);
+			wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+		}
+
+		wmma::store_matrix_sync(dot_tile, acc_frag, 16, wmma::mem_row_major);
+		__syncthreads();
+
+		if (row < 16 && a_base + row < WIDTH) {
+			for (int col = 0; col < 16 && b_base + col < WIDTH; col++) {
+				float d = lhs_norm_value + rhs_norm[b_base + col] - 2.0f * dot_tile[row * 16 + col];
+				if (d < best_score) {
+					best_score = d;
+					best_index = b_base + col;
+				}
+			}
+		}
+		__syncthreads();
+	}
+
+	if (row < 16 && a_base + row < WIDTH) {
+		if (best_score < 0.0f && best_score > -1e-4f) {
+			best_score = 0.0f;
+		}
+		score[a_base + row] = best_score;
+		index[a_base + row] = best_index;
+	}
+}
 
 #define CUDAErrorCheck(x) ErrorCheckImp((x), __FILE__, __LINE__)
 
@@ -1455,42 +1554,36 @@ bool MatchV8(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 	}
 	match_result.clear();
 
-	uint8_t* lhs_descriptor_host = nullptr;
-	uint8_t* rhs_descriptor_host = nullptr;
-	uint8_t* lhs_descriptor_device = nullptr;
-	uint8_t* rhs_descriptor_device = nullptr;
+	__half* lhs_descriptor_host = nullptr;
+	__half* rhs_descriptor_host = nullptr;
+	__half* lhs_descriptor_device = nullptr;
+	__half* rhs_descriptor_device = nullptr;
 	float* device_score = nullptr;
 	int* host_index = nullptr;
 	int* device_index = nullptr;
-	dim3 thread(32, 4);
-	dim3 block(size / 4, 1);
+	dim3 thread(32, 8);
+	dim3 block(size / 32, 1);
 	size_t offset = 0;
 	bool success = false;
 
-	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(uint8_t) * size * 128))) goto cleanup;
-	if (!CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(uint8_t) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(__half) * size * 128))) goto cleanup;
 	for (const Descriptor& descriptor : lhs) {
 		for (float value : descriptor) {
-			int v = static_cast<int>(value + 0.5f);
-			if (v < 0) v = 0;
-			if (v > 255) v = 255;
-			lhs_descriptor_host[offset++] = static_cast<uint8_t>(v);
+			lhs_descriptor_host[offset++] = __float2half_rn(value);
 		}
 	}
 	offset = 0;
 	for (const Descriptor& descriptor : rhs) {
 		for (float value : descriptor) {
-			int v = static_cast<int>(value + 0.5f);
-			if (v < 0) v = 0;
-			if (v > 255) v = 255;
-			rhs_descriptor_host[offset++] = static_cast<uint8_t>(v);
+			rhs_descriptor_host[offset++] = __float2half_rn(value);
 		}
 	}
 
-	if (!CUDAErrorCheck(cudaMalloc(&lhs_descriptor_device, sizeof(uint8_t) * size * 128))) goto cleanup;
-	if (!CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(uint8_t) * size * 128))) goto cleanup;
-	if (!CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(uint8_t) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
-	if (!CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(uint8_t) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&lhs_descriptor_device, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
 
 	if (!CUDAErrorCheck(cudaMallocHost(&host_index, sizeof(int) * size))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size))) goto cleanup;
@@ -1534,15 +1627,11 @@ bool MatchV9(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 	__half* rhs_descriptor_device = nullptr;
 	float* lhs_norm_device = nullptr;
 	float* rhs_norm_device = nullptr;
-	float* dots = nullptr;
 	float* device_score = nullptr;
 	int* host_index = nullptr;
 	int* device_index = nullptr;
-	cublasHandle_t handle = nullptr;
 	dim3 top1_thread(32);
-	dim3 top1_block(size);
-	float alpha = -2.0f;
-	float beta = 0.0f;
+	dim3 top1_block(size / 16);
 	bool success = false;
 
 	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(__half) * size * 128))) goto cleanup;
@@ -1557,8 +1646,8 @@ bool MatchV9(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 			float rhs_value = rhs[i][k];
 			__half lhs_half = __float2half_rn(lhs_value);
 			__half rhs_half = __float2half_rn(rhs_value);
-			lhs_descriptor_host[k * size + i] = lhs_half;
-			rhs_descriptor_host[k * size + i] = rhs_half;
+			lhs_descriptor_host[i * 128 + k] = lhs_half;
+			rhs_descriptor_host[i * 128 + k] = rhs_half;
 			float lhs_value_half = __half2float(lhs_half);
 			float rhs_value_half = __half2float(rhs_half);
 			lhs_norm += lhs_value_half * lhs_value_half;
@@ -1572,40 +1661,15 @@ bool MatchV9(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 	if (!CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(__half) * size * 128))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMalloc(&lhs_norm_device, sizeof(float) * size))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMalloc(&rhs_norm_device, sizeof(float) * size))) goto cleanup;
-	if (!CUDAErrorCheck(cudaMalloc(&dots, sizeof(float) * size * size))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMemcpy(lhs_norm_device, lhs_norm_host, sizeof(float) * size, cudaMemcpyHostToDevice))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMemcpy(rhs_norm_device, rhs_norm_host, sizeof(float) * size, cudaMemcpyHostToDevice))) goto cleanup;
 
-	if (!CUBLASErrorCheck(cublasCreate(&handle))) goto cleanup;
-	if (!CUBLASErrorCheck(cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH))) goto cleanup;
-	if (!CUBLASErrorCheck(cublasGemmEx(
-		handle,
-		CUBLAS_OP_N,
-		CUBLAS_OP_T,
-		static_cast<int>(size),
-		static_cast<int>(size),
-		128,
-		&alpha,
-		lhs_descriptor_device,
-		CUDA_R_16F,
-		static_cast<int>(size),
-		rhs_descriptor_device,
-		CUDA_R_16F,
-		static_cast<int>(size),
-		&beta,
-		dots,
-		CUDA_R_32F,
-		static_cast<int>(size),
-		CUBLAS_COMPUTE_32F,
-		CUBLAS_GEMM_DEFAULT_TENSOR_OP
-	))) goto cleanup;
-
 	if (!CUDAErrorCheck(cudaMallocHost(&host_index, sizeof(int) * size))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size))) goto cleanup;
 	if (!CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size))) goto cleanup;
-	ComputeTop1FromDotV9<<<top1_block, top1_thread>>>(dots, lhs_norm_device, rhs_norm_device, device_score, device_index, size);
+	ComputeNearestNeighborV9WMMA<<<top1_block, top1_thread>>>(lhs_descriptor_device, rhs_descriptor_device, lhs_norm_device, rhs_norm_device, device_score, device_index, size);
 	if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
 	if (!CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost))) goto cleanup;
 
@@ -1616,7 +1680,6 @@ bool MatchV9(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 	success = true;
 
 cleanup:
-	if (handle) cublasDestroy(handle);
 	if (lhs_descriptor_host) cudaFreeHost(lhs_descriptor_host);
 	if (rhs_descriptor_host) cudaFreeHost(rhs_descriptor_host);
 	if (lhs_norm_host) cudaFreeHost(lhs_norm_host);
@@ -1625,7 +1688,6 @@ cleanup:
 	if (rhs_descriptor_device) cudaFree(rhs_descriptor_device);
 	if (lhs_norm_device) cudaFree(lhs_norm_device);
 	if (rhs_norm_device) cudaFree(rhs_norm_device);
-	if (dots) cudaFree(dots);
 	if (device_score) cudaFree(device_score);
 	if (device_index) cudaFree(device_index);
 	if (host_index) cudaFreeHost(host_index);

@@ -5,6 +5,7 @@
 #include <random>
 #include <algorithm>
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include "match.h"
 
@@ -14,13 +15,56 @@ struct BenchmarkResult {
     int mismatch_count;
 };
 
+double EstimatedFlops(const std::string& name, size_t descriptor_num) {
+    double n = static_cast<double>(descriptor_num);
+    double k = 128.0;
+    if (name == "v9") {
+        return n * n * (2.0 * k + 3.0);
+    }
+    return n * n * (3.0 * k);
+}
+
+double EstimatedMemoryBytes(const std::string& name, size_t descriptor_num) {
+    double n = static_cast<double>(descriptor_num);
+    double k = 128.0;
+    if (name == "v1") {
+        double descriptor_scan = (n / 32.0) * (32.0 * k * 4.0 + n * k * 4.0);
+        double matrix_write_read = 2.0 * n * n * 4.0;
+        return descriptor_scan + matrix_write_read;
+    }
+    if (name == "v4") {
+        return (n / 8.0) * (8.0 * k * 4.0 + n * k * 4.0);
+    }
+    if (name == "v8") {
+        return (n / 32.0) * (32.0 * k * 2.0 + n * k * 2.0);
+    }
+    if (name == "v9") {
+        double descriptor_scan = (n / 16.0) * (16.0 * k * 2.0 + n * k * 2.0);
+        double norm_scan = (n / 16.0) * (16.0 * 4.0 + n * 4.0);
+        return descriptor_scan + norm_scan;
+    }
+    return (n / 32.0) * (32.0 * k * 4.0 + n * k * 4.0);
+}
+
+void PrintMetrics(const std::string& name, const BenchmarkResult& result, size_t descriptor_num) {
+    if (!result.success || result.elapsed_ms <= 0) {
+        return;
+    }
+    double seconds = static_cast<double>(result.elapsed_ms) / 1000.0;
+    double gflops = EstimatedFlops(name, descriptor_num) / seconds / 1e9;
+    double bandwidth = EstimatedMemoryBytes(name, descriptor_num) / seconds / 1e9;
+    std::cout << name << " estimated compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
+    std::cout << name << " estimated bandwidth : " << std::fixed << std::setprecision(2) << bandwidth << " GB/s" << std::endl;
+}
+
 BenchmarkResult RunBenchmark(const std::string& name,
                              bool (*matcher)(const std::vector<Descriptor>&,
                                              const std::vector<Descriptor>&,
                                              std::vector<std::pair<int, int>>&),
                              const std::vector<Descriptor>& lhs,
                              const std::vector<Descriptor>& rhs,
-                             const std::vector<int>& expected_match) {
+                             const std::vector<int>& expected_match,
+                             size_t descriptor_num) {
     std::vector<std::pair<int, int>> match_result;
     auto start = std::chrono::high_resolution_clock::now();
     bool success = matcher(lhs, rhs, match_result);
@@ -48,6 +92,7 @@ BenchmarkResult RunBenchmark(const std::string& name,
     result.success = success;
     result.elapsed_ms = elapsed_ms;
     result.mismatch_count = mismatch_count;
+    PrintMetrics(name, result, descriptor_num);
     return result;
 }
 
@@ -76,18 +121,18 @@ void MATCH() {
         expected_match[shuffle[i]] = i;
     }
 
-    BenchmarkResult v1 = RunBenchmark("v1", MatchV1, lhs, rhs, expected_match);
-    BenchmarkResult v2 = RunBenchmark("v2", MatchV2, lhs, rhs, expected_match);
-    BenchmarkResult v3 = RunBenchmark("v3", MatchV3, lhs, rhs, expected_match);
-    BenchmarkResult v4 = RunBenchmark("v4", MatchV4, lhs, rhs, expected_match);
-    BenchmarkResult v5 = RunBenchmark("v5", MatchV5, lhs, rhs, expected_match);
-    BenchmarkResult v5a = RunBenchmark("v5a", MatchV5a, lhs, rhs, expected_match);
-    BenchmarkResult v5b = RunBenchmark("v5b", MatchV5b, lhs, rhs, expected_match);
-    BenchmarkResult v5c = RunBenchmark("v5c", MatchV5c, lhs, rhs, expected_match);
-    BenchmarkResult v6 = RunBenchmark("v6", MatchV6, lhs, rhs, expected_match);
-    BenchmarkResult v7 = RunBenchmark("v7", MatchV7, lhs, rhs, expected_match);
-    BenchmarkResult v8 = RunBenchmark("v8", MatchV8, lhs, rhs, expected_match);
-    BenchmarkResult v9 = RunBenchmark("v9", MatchV9, lhs, rhs, expected_match);
+    BenchmarkResult v1 = RunBenchmark("v1", MatchV1, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v2 = RunBenchmark("v2", MatchV2, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v3 = RunBenchmark("v3", MatchV3, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v4 = RunBenchmark("v4", MatchV4, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v5 = RunBenchmark("v5", MatchV5, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v5a = RunBenchmark("v5a", MatchV5a, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v5b = RunBenchmark("v5b", MatchV5b, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v5c = RunBenchmark("v5c", MatchV5c, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v6 = RunBenchmark("v6", MatchV6, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v7 = RunBenchmark("v7", MatchV7, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v8 = RunBenchmark("v8", MatchV8, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v9 = RunBenchmark("v9", MatchV9, lhs, rhs, expected_match, descriptor_num);
 
     if (v1.success && v2.success && v1.mismatch_count == 0 && v2.mismatch_count == 0 && v2.elapsed_ms > 0) {
         double speedup = static_cast<double>(v1.elapsed_ms) / static_cast<double>(v2.elapsed_ms);

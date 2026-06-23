@@ -4,20 +4,14 @@ project(CUDA_MATCH)
 set(CXX_STANDARD 11)
 
 find_package(CUDA REQUIRED)
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-gencode=arch=compute_86,code=sm_86)
 find_package(GTest REQUIRED)
-find_library(CUDA_CUBLAS_LIBRARY
-  NAMES cublas
-  PATHS ${CUDA_TOOLKIT_ROOT_DIR}/lib64 ${CUDA_TOOLKIT_ROOT_DIR}/lib
-)
-if (NOT CUDA_CUBLAS_LIBRARY)
-  message(FATAL_ERROR "Could not find cuBLAS library")
-endif()
 
 cuda_add_library(cuda_kernel match.cu)
 
 add_executable(${PROJECT_NAME} main.cc)
 
-target_link_libraries(${PROJECT_NAME} PUBLIC cuda_kernel ${CUDA_CUBLAS_LIBRARY})
+target_link_libraries(${PROJECT_NAME} PUBLIC cuda_kernel)
 
 add_executable(gemm_test gemm_test.cc)
 
