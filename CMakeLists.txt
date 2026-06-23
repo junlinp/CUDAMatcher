@@ -8,6 +8,7 @@ set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-gencode=arch=compute_86,code=sm_86)
 find_package(GTest REQUIRED)
 
 cuda_add_library(cuda_kernel match.cu)
+target_link_libraries(cuda_kernel ${CUDA_CUBLAS_LIBRARY})
 
 add_executable(${PROJECT_NAME} main.cc)
 

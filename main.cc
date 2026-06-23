@@ -25,10 +25,18 @@ double EstimatedFlops(size_t descriptor_num) {
 	return n * n * (3.0 * k);
 }
 
-double EstimatedLogicalBytes(size_t descriptor_num) {
+double EstimatedLogicalBytes(const std::string& name, size_t descriptor_num) {
 	double n = static_cast<double>(descriptor_num);
 	double k = 128.0;
 	double descriptor_scan = (n / 32.0) * (32.0 * k * 4.0 + n * k * 4.0);
+	if (name == "v2") {
+		return descriptor_scan;
+	}
+	if (name == "v3") {
+		double dot_tile_write_read = 2.0 * n * n * 4.0;
+		double norm_scan = 2.0 * n * 4.0;
+		return descriptor_scan + dot_tile_write_read + norm_scan;
+	}
 	double matrix_write_read = 2.0 * n * n * 4.0;
 	return descriptor_scan + matrix_write_read;
 }
@@ -39,7 +47,7 @@ void PrintMetrics(const std::string& name, const BenchmarkResult& result, size_t
 	}
 	double seconds = result.wall_best_ms / 1000.0;
 	double gflops = EstimatedFlops(descriptor_num) / seconds / 1e9;
-	double logical_gbytes = EstimatedLogicalBytes(descriptor_num) / seconds / 1e9;
+	double logical_gbytes = EstimatedLogicalBytes(name, descriptor_num) / seconds / 1e9;
 	std::cout << name << " wall best : " << std::fixed << std::setprecision(3) << result.wall_best_ms << " ms" << std::endl;
 	std::cout << name << " wall avg : " << std::fixed << std::setprecision(3) << result.wall_avg_ms << " ms" << std::endl;
 	std::cout << name << " wall-best algorithmic compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
@@ -47,7 +55,7 @@ void PrintMetrics(const std::string& name, const BenchmarkResult& result, size_t
 	if (result.device_best_ms > 0.0f) {
 		double device_seconds = static_cast<double>(result.device_best_ms) / 1000.0;
 		double device_gflops = EstimatedFlops(descriptor_num) / device_seconds / 1e9;
-		double device_logical_gbytes = EstimatedLogicalBytes(descriptor_num) / device_seconds / 1e9;
+		double device_logical_gbytes = EstimatedLogicalBytes(name, descriptor_num) / device_seconds / 1e9;
 		std::cout << name << " device best : " << std::fixed << std::setprecision(3) << result.device_best_ms << " ms" << std::endl;
 		std::cout << name << " device avg : " << std::fixed << std::setprecision(3) << result.device_avg_ms << " ms" << std::endl;
 		std::cout << name << " device-best algorithmic compute : " << std::fixed << std::setprecision(2) << device_gflops << " GFLOP/s" << std::endl;
@@ -55,22 +63,26 @@ void PrintMetrics(const std::string& name, const BenchmarkResult& result, size_t
 	}
 }
 
-void PrintKernelMetrics(const KernelBenchmarkResult& result, size_t descriptor_num) {
-	std::cout << "v1 kernel-only mismatch count : " << result.mismatch_count << std::endl;
+void PrintKernelMetrics(const std::string& name, const KernelBenchmarkResult& result, size_t descriptor_num) {
+	std::cout << name << " kernel-only mismatch count : " << result.mismatch_count << std::endl;
 	if (!result.success || result.best_ms <= 0.0f) {
-		std::cout << "v1 kernel-only benchmark failed" << std::endl;
+		std::cout << name << " kernel-only benchmark failed" << std::endl;
 		return;
 	}
 	double seconds = static_cast<double>(result.best_ms) / 1000.0;
 	double gflops = EstimatedFlops(descriptor_num) / seconds / 1e9;
-	double logical_gbytes = EstimatedLogicalBytes(descriptor_num) / seconds / 1e9;
-	std::cout << "v1 kernel-only best : " << std::fixed << std::setprecision(3) << result.best_ms << " ms" << std::endl;
-	std::cout << "v1 kernel-only avg : " << std::fixed << std::setprecision(3) << result.avg_ms << " ms" << std::endl;
-	std::cout << "v1 kernel-only algorithmic compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
-	std::cout << "v1 kernel-only estimated logical bytes : " << std::fixed << std::setprecision(2) << logical_gbytes << " GB/s" << std::endl;
+	double logical_gbytes = EstimatedLogicalBytes(name, descriptor_num) / seconds / 1e9;
+	std::cout << name << " kernel-only best : " << std::fixed << std::setprecision(3) << result.best_ms << " ms" << std::endl;
+	std::cout << name << " kernel-only avg : " << std::fixed << std::setprecision(3) << result.avg_ms << " ms" << std::endl;
+	std::cout << name << " kernel-only algorithmic compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
+	std::cout << name << " kernel-only estimated logical bytes : " << std::fixed << std::setprecision(2) << logical_gbytes << " GB/s" << std::endl;
 }
 
-BenchmarkResult RunBenchmark(const std::vector<Descriptor>& lhs,
+BenchmarkResult RunBenchmark(const std::string& name,
+                             bool (*matcher)(const std::vector<Descriptor>&,
+                                             const std::vector<Descriptor>&,
+                                             std::vector<std::pair<int, int>>&),
+                             const std::vector<Descriptor>& lhs,
                              const std::vector<Descriptor>& rhs,
                              const std::vector<int>& expected_match,
                              size_t descriptor_num) {
@@ -92,7 +104,7 @@ BenchmarkResult RunBenchmark(const std::vector<Descriptor>& lhs,
 		cudaEventCreate(&device_stop);
 		cudaEventRecord(device_start, 0);
 		auto start = std::chrono::high_resolution_clock::now();
-		bool run_success = MatchV1(lhs, rhs, match_result);
+		bool run_success = matcher(lhs, rhs, match_result);
 		auto end = std::chrono::high_resolution_clock::now();
 		cudaEventRecord(device_stop, 0);
 		cudaEventSynchronize(device_stop);
@@ -137,12 +149,12 @@ BenchmarkResult RunBenchmark(const std::vector<Descriptor>& lhs,
 	result.device_avg_ms = device_sum_ms / static_cast<float>(measured_runs);
 	result.mismatch_count = mismatch_count;
 
-	std::cout << "v1 measured runs : " << measured_runs << " + " << warmup_runs << " warmup" << std::endl;
-	std::cout << "v1 mismatch count : " << mismatch_count << std::endl;
+	std::cout << name << " measured runs : " << measured_runs << " + " << warmup_runs << " warmup" << std::endl;
+	std::cout << name << " mismatch count : " << mismatch_count << std::endl;
 	if (!success) {
-		std::cout << "v1 match failed" << std::endl;
+		std::cout << name << " match failed" << std::endl;
 	}
-	PrintMetrics("v1", result, descriptor_num);
+	PrintMetrics(name, result, descriptor_num);
 	return result;
 }
 
@@ -171,14 +183,46 @@ void MATCH() {
 		expected_match[shuffle[i]] = static_cast<int>(i);
 	}
 
-	RunBenchmark(lhs, rhs, expected_match, descriptor_num);
+	BenchmarkResult v1 = RunBenchmark("v1", MatchV1, lhs, rhs, expected_match, descriptor_num);
+	BenchmarkResult v2 = RunBenchmark("v2", MatchV2, lhs, rhs, expected_match, descriptor_num);
+	BenchmarkResult v3 = RunBenchmark("v3", MatchV3, lhs, rhs, expected_match, descriptor_num);
+	if (v1.success && v2.success && v1.mismatch_count == 0 && v2.mismatch_count == 0 && v2.wall_best_ms > 0.0) {
+		double speedup = v1.wall_best_ms / v2.wall_best_ms;
+		std::cout << "v2 speedup over v1 : " << std::fixed << std::setprecision(2) << speedup << "x" << std::endl;
+	}
+	if (v1.success && v3.success && v1.mismatch_count == 0 && v3.mismatch_count == 0 && v3.wall_best_ms > 0.0) {
+		double speedup = v1.wall_best_ms / v3.wall_best_ms;
+		std::cout << "v3 speedup over v1 : " << std::fixed << std::setprecision(2) << speedup << "x" << std::endl;
+	}
+	if (v2.success && v3.success && v2.mismatch_count == 0 && v3.mismatch_count == 0 && v3.wall_best_ms > 0.0) {
+		double speedup = v2.wall_best_ms / v3.wall_best_ms;
+		std::cout << "v3 speedup over v2 : " << std::fixed << std::setprecision(2) << speedup << "x" << std::endl;
+	}
 
 	const int warmup_runs = 5;
 	const int measured_runs = 20;
-	KernelBenchmarkResult kernel_result;
 	std::cout << "kernel-only measured runs : " << measured_runs << " + " << warmup_runs << " warmup" << std::endl;
-	BenchmarkKernelV1(lhs, rhs, expected_match, warmup_runs, measured_runs, kernel_result);
-	PrintKernelMetrics(kernel_result, descriptor_num);
+	KernelBenchmarkResult v1_kernel;
+	BenchmarkKernelV1(lhs, rhs, expected_match, warmup_runs, measured_runs, v1_kernel);
+	PrintKernelMetrics("v1", v1_kernel, descriptor_num);
+	KernelBenchmarkResult v2_kernel;
+	BenchmarkKernelV2(lhs, rhs, expected_match, warmup_runs, measured_runs, v2_kernel);
+	PrintKernelMetrics("v2", v2_kernel, descriptor_num);
+	KernelBenchmarkResult v3_kernel;
+	BenchmarkKernelV3(lhs, rhs, expected_match, warmup_runs, measured_runs, v3_kernel);
+	PrintKernelMetrics("v3", v3_kernel, descriptor_num);
+	if (v1_kernel.success && v2_kernel.success && v1_kernel.mismatch_count == 0 && v2_kernel.mismatch_count == 0 && v2_kernel.best_ms > 0.0f) {
+		double speedup = static_cast<double>(v1_kernel.best_ms) / static_cast<double>(v2_kernel.best_ms);
+		std::cout << "v2 kernel-only speedup over v1 : " << std::fixed << std::setprecision(2) << speedup << "x" << std::endl;
+	}
+	if (v1_kernel.success && v3_kernel.success && v1_kernel.mismatch_count == 0 && v3_kernel.mismatch_count == 0 && v3_kernel.best_ms > 0.0f) {
+		double speedup = static_cast<double>(v1_kernel.best_ms) / static_cast<double>(v3_kernel.best_ms);
+		std::cout << "v3 kernel-only speedup over v1 : " << std::fixed << std::setprecision(2) << speedup << "x" << std::endl;
+	}
+	if (v2_kernel.success && v3_kernel.success && v2_kernel.mismatch_count == 0 && v3_kernel.mismatch_count == 0 && v3_kernel.best_ms > 0.0f) {
+		double speedup = static_cast<double>(v2_kernel.best_ms) / static_cast<double>(v3_kernel.best_ms);
+		std::cout << "v3 kernel-only speedup over v2 : " << std::fixed << std::setprecision(2) << speedup << "x" << std::endl;
+	}
 }
 
 int main(int argc, char** argv) {

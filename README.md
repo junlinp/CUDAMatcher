@@ -17,16 +17,29 @@ The v1 implementation is also exposed directly for benchmarking:
 
 ```cpp
 bool MatchV1(...);
+bool MatchV2(...);
+bool MatchV3(...);
 bool BenchmarkKernelV1(...);
+bool BenchmarkKernelV2(...);
+bool BenchmarkKernelV3(...);
 ```
 
 `Descriptor` is `std::array<float, 128>`. The current CUDA matcher expects
-`lhs.size() == rhs.size()` and a descriptor count divisible by 256.
+`lhs.size() == rhs.size()`. The default v3 matcher expects a descriptor count
+divisible by 1024; v1 expects divisibility by 256, and v2 expects divisibility
+by 32.
 
 ## Version
 
 - `v1`: computes the full pairwise distance matrix, then runs a second CUDA
   kernel to find each nearest neighbor.
+- `v2`: fuses distance computation and nearest-neighbor reduction. It scans
+  right-hand descriptor tiles and updates each left descriptor's best
+  score/index online, avoiding the full `N x N` distance matrix.
+- `v3`: tiled cuBLAS SGEMM path. It computes
+  `dist(a, b) = ||a||^2 + ||b||^2 - 2ab^T`, calls cuBLAS for
+  `A * B_tile^T`, reduces each dot-product tile online into top-1
+  score/index, and discards the tile.
 
 On an NVIDIA GeForce RTX 3050 Ti Laptop GPU, the matcher benchmark for
 `16,384 x 16,384` descriptors produced this sample run.
@@ -45,25 +58,38 @@ FP16 Tensor Core sparse peak: ~86.02 TFLOP/s
 Memory bandwidth: ~192.03 GB/s
 ```
 
+The executable still prints CUDA-event and wall-clock timing as a correctness
+and regression sanity check. Nsight Compute is used as the authoritative kernel
+performance measurement because it reports kernel duration and hardware
+counters.
+
+Application timing from `./build/CUDA_MATCH`:
+
 ```text
 version  wall best  wall avg  device best  algorithmic compute  logical bytes
-v1        81.347 ms   86.836 ms   81.355 ms  1267.15 GFLOP/s      79.30 GB/s
+v1        79.973 ms   89.610 ms   79.978 ms  1288.93 GFLOP/s      80.66 GB/s
+v2        62.513 ms   65.505 ms   62.526 ms  1648.91 GFLOP/s      68.84 GB/s
+v3        45.457 ms   47.986 ms   45.462 ms  2267.61 GFLOP/s     141.91 GB/s
 ```
 
-The end-to-end benchmark is measured with 1 warmup run and 5 measured runs. The
-run above reported 0 mismatches. The algorithmic compute column uses modeled
-matching FLOPs divided by wall-best time. The logical bytes column uses modeled
-algorithm-level bytes divided by wall-best time. Logical bytes are not measured
-DRAM bandwidth.
-
-The benchmark also includes kernel-only timing for v1. In this mode descriptors
-are allocated and copied once; then only repeated kernel launches are timed with
-CUDA events:
+Nsight Compute kernel timing:
 
 ```text
-version  kernel best  kernel avg  algorithmic compute  logical bytes
-v1        54.836 ms    57.505 ms  1879.78 GFLOP/s      117.64 GB/s
+kernel                   duration   DRAM read   DRAM write  DRAM peak  L2 peak  SM peak  active warps
+ComputeDistanceMatrixV1   56.57 ms  126.03 MB     1.07 GB     11.06%     9.67%   51.20%       33.24%
+CloseElementV1             5.71 ms    1.07 GB   195.71 KB     98.13%    31.80%   36.20%       66.42%
+V1 total                  62.28 ms    1.20 GB     1.07 GB          -         -        -            -
+ComputeNearestNeighborV2  63.15 ms  123.35 MB   965.50 KB      1.03%     5.75%   52.05%       33.24%
+ampere_sgemm_128x64_tn     1.20 ms    8.95 MB    66.08 MB     32.60%    37.43%   73.85%       32.84%
+ReduceDotTileKernel        0.37 ms   67.29 MB   148.99 KB     94.63%    31.44%   28.53%       32.44%
 ```
+
+The `ncu` result shows that v2 removes the full-matrix write/read traffic, but
+the custom fused FP32 kernel is only roughly equal to v1 at the kernel level.
+V3 is faster because cuBLAS raises the GEMM tile's SM throughput to about 74%.
+For a 1024-descriptor B tile, one cuBLAS SGEMM costs about `1.20 ms` and the
+online reduction over that dot tile costs about `0.37 ms`. With 16 B tiles, the
+measured v3 kernel-only loop is about `25 ms`.
 
 ## Nsight Profile
 
@@ -112,10 +138,16 @@ reads it back in `CloseElementV1`. For `16,384 x 16,384`, that matrix is about
 DRAM throughput, while the first kernel spends more time on FP32 arithmetic and
 shared-memory data movement.
 
-Optimization direction for v1:
+V2 changes the bottleneck. It has much lower DRAM traffic and only reaches
+`0.97%` of peak DRAM throughput, so it is not memory-bandwidth bound. Its SM
+throughput is close to v1's distance kernel, but active warps are still only
+about `33.24%` and the kernel still uses the original shared-memory transpose
+and score-buffer staging pattern.
 
-- Fuse distance computation and nearest-neighbor reduction so the full matrix is
-  never written to or reread from DRAM.
+Optimization direction:
+
+- V2 already fuses distance computation and nearest-neighbor reduction so the
+  full matrix is never written to or reread from DRAM.
 - Keep only per-left-descriptor best score/index in registers or shared memory
   while scanning right-hand tiles.
 - Preserve the existing `float4` descriptor loads, but remove the
@@ -125,10 +157,17 @@ Optimization direction for v1:
 - After the fused FP32 path is correct, consider `half` storage or WMMA dot
   products only if descriptor precision can change.
 
-These steps remove roughly one full-matrix write plus one full-matrix read per
-match and target the measured v1 bottleneck directly. The first optimization
-should stay FP32 and exact relative to v1 so the effect of eliminating matrix
-materialization can be measured cleanly.
+The latest v2 optimization replaced the tile-score shared-memory scan with
+warp-level reductions and then moved per-row best-score state from shared memory
+to registers, reducing `ncu` duration from `69.37 ms` to `63.15 ms`. The next
+optimization should remove more of the shared-memory `score_buffer` and
+`rotation_score` staging path.
+
+V3 changes the bottleneck again. The cuBLAS GEMM tile is compute-efficient, but
+the reduction kernel is memory-bandwidth bound because it streams the
+`N x tile` dot-product tile from global memory. The next useful v3 optimization
+is increasing tile size or fusing more of the distance/top-1 update with GEMM
+output when practical.
 
 ## Build
 
