@@ -88,18 +88,18 @@ Memory bandwidth: ~192.03 GB/s
 
 ```text
 version  wall best  wall avg  device best  estimated compute  estimated bandwidth
-v1        81.555 ms   87.658 ms   81.562 ms  1263.93 GFLOP/s    79.10 GB/s
-v2        65.470 ms   69.913 ms   65.479 ms  1574.45 GFLOP/s    65.73 GB/s
-v3        60.688 ms   66.499 ms   60.694 ms  1698.51 GFLOP/s    70.91 GB/s
-v4       312.868 ms  316.664 ms  312.873 ms   329.47 GFLOP/s    54.94 GB/s
-v5       107.369 ms  108.835 ms  107.374 ms   960.04 GFLOP/s    40.08 GB/s
-v5a       62.874 ms   67.123 ms   62.883 ms  1639.47 GFLOP/s    68.44 GB/s
-v5b       64.141 ms   66.917 ms   64.146 ms  1607.08 GFLOP/s    67.09 GB/s
-v5c      107.348 ms  109.202 ms  107.355 ms   960.24 GFLOP/s    40.09 GB/s
-v6        63.917 ms   68.260 ms   63.845 ms  1612.70 GFLOP/s    67.33 GB/s
-v7        65.120 ms   66.384 ms   65.127 ms  1582.90 GFLOP/s    66.08 GB/s
-v8       115.316 ms  118.791 ms  115.320 ms   893.88 GFLOP/s    18.66 GB/s
-v9       125.417 ms  126.783 ms  125.422 ms   554.35 GFLOP/s    34.81 GB/s
+v1        87.207 ms   90.148 ms   87.215 ms  1182.01 GFLOP/s    73.97 GB/s
+v2        65.358 ms   70.674 ms   65.365 ms  1577.16 GFLOP/s    65.84 GB/s
+v3        66.277 ms   68.331 ms   66.284 ms  1555.28 GFLOP/s    64.93 GB/s
+v4       318.585 ms  321.221 ms  318.592 ms   323.55 GFLOP/s    53.95 GB/s
+v5       101.796 ms  107.189 ms  101.803 ms  1012.60 GFLOP/s    42.27 GB/s
+v5a       67.537 ms   67.985 ms   67.545 ms  1526.26 GFLOP/s    63.72 GB/s
+v5b       65.541 ms   68.874 ms   65.548 ms  1572.74 GFLOP/s    65.66 GB/s
+v5c      106.434 ms  109.227 ms  106.440 ms   968.48 GFLOP/s    40.43 GB/s
+v6        68.302 ms   71.027 ms   68.306 ms  1509.18 GFLOP/s    63.01 GB/s
+v7        64.770 ms   67.044 ms   64.775 ms  1591.46 GFLOP/s    66.44 GB/s
+v8       122.433 ms  124.483 ms  122.438 ms   841.92 GFLOP/s    17.57 GB/s
+v9       124.043 ms  125.533 ms  124.046 ms   560.49 GFLOP/s    35.20 GB/s
 ```
 
 Each version is measured with 1 warmup run and 5 measured runs. All runs
@@ -108,6 +108,31 @@ are benchmark estimates based on the algorithm's modeled FLOPs and memory
 traffic, not Nsight hardware counters. The benchmark also prints CUDA event
 device average/best time and device-side estimated compute/bandwidth for each
 version.
+
+The benchmark also includes kernel-only timing for all versions. In this mode
+descriptors are allocated, converted, and copied once; then only repeated kernel
+launches are timed with CUDA events:
+
+```text
+version  kernel best  kernel avg  estimated compute  estimated bandwidth
+v1        60.311 ms    63.436 ms  1709.14 GFLOP/s   106.96 GB/s
+v2        58.186 ms    63.587 ms  1771.56 GFLOP/s    73.96 GB/s
+v3        57.428 ms    60.955 ms  1794.93 GFLOP/s    74.93 GB/s
+v4       306.674 ms   312.692 ms   336.12 GFLOP/s    56.05 GB/s
+v5        99.880 ms   102.917 ms  1032.03 GFLOP/s    43.09 GB/s
+v5a       56.109 ms    60.939 ms  1837.12 GFLOP/s    76.70 GB/s
+v5b       56.189 ms    60.781 ms  1834.51 GFLOP/s    76.59 GB/s
+v5c       94.597 ms    99.890 ms  1089.67 GFLOP/s    45.49 GB/s
+v6        55.704 ms    59.456 ms  1850.50 GFLOP/s    77.25 GB/s
+v7        52.630 ms    57.470 ms  1958.58 GFLOP/s    81.77 GB/s
+v8        49.691 ms    56.410 ms  2074.41 GFLOP/s    43.30 GB/s
+v9        19.715 ms    24.447 ms  3526.48 GFLOP/s   221.47 GB/s
+```
+
+Kernel-only timing shows the WMMA/Tensor Core v9 kernel is the fastest path once
+host conversion, allocation, H2D copies, D2H copies, and per-call setup are
+removed. The remaining end-to-end bottleneck for v9 is the preparation path, not
+the matching kernel itself.
 
 ## Build
 

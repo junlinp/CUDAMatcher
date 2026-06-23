@@ -73,6 +73,67 @@ void PrintMetrics(const std::string& name, const BenchmarkResult& result, size_t
     }
 }
 
+void PrintKernelMetrics(const std::string& name, const KernelBenchmarkResult& result, size_t descriptor_num) {
+    std::cout << name << " kernel-only mismatch count : " << result.mismatch_count << std::endl;
+    if (!result.success || result.best_ms <= 0.0f) {
+        std::cout << name << " kernel-only benchmark failed" << std::endl;
+        return;
+    }
+    double seconds = static_cast<double>(result.best_ms) / 1000.0;
+    double gflops = EstimatedFlops(name, descriptor_num) / seconds / 1e9;
+    double bandwidth = EstimatedMemoryBytes(name, descriptor_num) / seconds / 1e9;
+    std::cout << name << " kernel-only best : " << std::fixed << std::setprecision(3) << result.best_ms << " ms" << std::endl;
+    std::cout << name << " kernel-only avg : " << std::fixed << std::setprecision(3) << result.avg_ms << " ms" << std::endl;
+    std::cout << name << " kernel-only estimated compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
+    std::cout << name << " kernel-only estimated bandwidth : " << std::fixed << std::setprecision(2) << bandwidth << " GB/s" << std::endl;
+}
+
+void RunKernelOnlyBenchmarks(const std::vector<Descriptor>& lhs,
+                             const std::vector<Descriptor>& rhs,
+                             const std::vector<int>& expected_match,
+                             size_t descriptor_num) {
+    const int warmup_runs = 5;
+    const int measured_runs = 20;
+    KernelBenchmarkResult v1;
+    KernelBenchmarkResult v2;
+    KernelBenchmarkResult v3;
+    KernelBenchmarkResult v4;
+    KernelBenchmarkResult v5;
+    KernelBenchmarkResult v5a;
+    KernelBenchmarkResult v5b;
+    KernelBenchmarkResult v5c;
+    KernelBenchmarkResult v6;
+    KernelBenchmarkResult v7;
+    KernelBenchmarkResult v8;
+    KernelBenchmarkResult v9;
+
+    std::cout << "kernel-only measured runs : " << measured_runs << " + " << warmup_runs << " warmup" << std::endl;
+    BenchmarkKernelV1(lhs, rhs, expected_match, warmup_runs, measured_runs, v1);
+    PrintKernelMetrics("v1", v1, descriptor_num);
+    BenchmarkKernelV2(lhs, rhs, expected_match, warmup_runs, measured_runs, v2);
+    PrintKernelMetrics("v2", v2, descriptor_num);
+    BenchmarkKernelV3(lhs, rhs, expected_match, warmup_runs, measured_runs, v3);
+    PrintKernelMetrics("v3", v3, descriptor_num);
+    BenchmarkKernelV4(lhs, rhs, expected_match, warmup_runs, measured_runs, v4);
+    PrintKernelMetrics("v4", v4, descriptor_num);
+    BenchmarkKernelV5(lhs, rhs, expected_match, warmup_runs, measured_runs, v5);
+    PrintKernelMetrics("v5", v5, descriptor_num);
+    BenchmarkKernelV5a(lhs, rhs, expected_match, warmup_runs, measured_runs, v5a);
+    PrintKernelMetrics("v5a", v5a, descriptor_num);
+    BenchmarkKernelV5b(lhs, rhs, expected_match, warmup_runs, measured_runs, v5b);
+    PrintKernelMetrics("v5b", v5b, descriptor_num);
+    BenchmarkKernelV5c(lhs, rhs, expected_match, warmup_runs, measured_runs, v5c);
+    PrintKernelMetrics("v5c", v5c, descriptor_num);
+    BenchmarkKernelV6(lhs, rhs, expected_match, warmup_runs, measured_runs, v6);
+    PrintKernelMetrics("v6", v6, descriptor_num);
+    BenchmarkKernelV7(lhs, rhs, expected_match, warmup_runs, measured_runs, v7);
+    PrintKernelMetrics("v7", v7, descriptor_num);
+    BenchmarkKernelV8(lhs, rhs, expected_match, warmup_runs, measured_runs, v8);
+    PrintKernelMetrics("v8", v8, descriptor_num);
+    BenchmarkKernelV9(lhs, rhs, expected_match, warmup_runs, measured_runs, v9);
+    PrintKernelMetrics("v9", v9, descriptor_num);
+}
+
 BenchmarkResult RunBenchmark(const std::string& name,
                              bool (*matcher)(const std::vector<Descriptor>&,
                                              const std::vector<Descriptor>&,
@@ -262,6 +323,8 @@ void MATCH() {
         double speedup = static_cast<double>(v6.wall_best_ms) / static_cast<double>(v9.wall_best_ms);
         std::cout << "v9 speedup over v6 : " << speedup << "x" << std::endl;
     }
+
+    RunKernelOnlyBenchmarks(lhs, rhs, expected_match, descriptor_num);
 }
 int main(int argc, char** argv) {
     MATCH();

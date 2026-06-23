@@ -1718,6 +1718,428 @@ cleanup:
 	return success;
 }
 
+template <typename KernelFn>
+bool BenchmarkFloatKernel(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result, KernelFn kernel, dim3 block, dim3 thread) {
+	size_t size = lhs.size();
+	result.success = false;
+	result.best_ms = 0.0f;
+	result.avg_ms = 0.0f;
+	result.mismatch_count = static_cast<int>(expected_match.size());
+	if (size == 0 || size != rhs.size() || size != expected_match.size() || size % 32 != 0 || warmup_runs < 0 || measured_runs <= 0) {
+		fprintf(stderr, "ERROR Checked : invalid kernel benchmark input\n");
+		return false;
+	}
+
+	float* lhs_descriptor_host = nullptr;
+	float* rhs_descriptor_host = nullptr;
+	float* lhs_descriptor_device = nullptr;
+	float* rhs_descriptor_device = nullptr;
+	float* device_score = nullptr;
+	int* host_index = nullptr;
+	int* device_index = nullptr;
+	cudaEvent_t start = nullptr;
+	cudaEvent_t stop = nullptr;
+	bool success = false;
+	float best_ms = 1e30f;
+	float sum_ms = 0.0f;
+
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
+	CopyDescriptorToPinnedMemory(lhs, lhs_descriptor_host);
+	CopyDescriptorToPinnedMemory(rhs, rhs_descriptor_host);
+	if (!CUDAErrorCheck(cudaMalloc(&lhs_descriptor_device, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&host_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+
+	for (int i = 0; i < warmup_runs; i++) {
+		kernel<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, device_score, device_index, size);
+	}
+	if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+	if (!CUDAErrorCheck(cudaDeviceSynchronize())) goto cleanup;
+
+	if (!CUDAErrorCheck(cudaEventCreate(&start))) goto cleanup;
+	if (!CUDAErrorCheck(cudaEventCreate(&stop))) goto cleanup;
+	for (int i = 0; i < measured_runs; i++) {
+		float elapsed_ms = 0.0f;
+		if (!CUDAErrorCheck(cudaEventRecord(start, 0))) goto cleanup;
+		kernel<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, device_score, device_index, size);
+		if (!CUDAErrorCheck(cudaEventRecord(stop, 0))) goto cleanup;
+		if (!CUDAErrorCheck(cudaEventSynchronize(stop))) goto cleanup;
+		if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+		if (!CUDAErrorCheck(cudaEventElapsedTime(&elapsed_ms, start, stop))) goto cleanup;
+		sum_ms += elapsed_ms;
+		if (elapsed_ms < best_ms) {
+			best_ms = elapsed_ms;
+		}
+	}
+
+	if (!CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost))) goto cleanup;
+	result.mismatch_count = 0;
+	for (size_t i = 0; i < size; i++) {
+		if (host_index[i] != expected_match[i]) {
+			result.mismatch_count++;
+		}
+	}
+	result.best_ms = best_ms;
+	result.avg_ms = sum_ms / static_cast<float>(measured_runs);
+	result.success = result.mismatch_count == 0;
+	success = result.success;
+
+cleanup:
+	if (start) cudaEventDestroy(start);
+	if (stop) cudaEventDestroy(stop);
+	if (lhs_descriptor_host) cudaFreeHost(lhs_descriptor_host);
+	if (rhs_descriptor_host) cudaFreeHost(rhs_descriptor_host);
+	if (lhs_descriptor_device) cudaFree(lhs_descriptor_device);
+	if (rhs_descriptor_device) cudaFree(rhs_descriptor_device);
+	if (device_score) cudaFree(device_score);
+	if (device_index) cudaFree(device_index);
+	if (host_index) cudaFreeHost(host_index);
+	return success;
+}
+
+bool BenchmarkKernelV1(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	size_t size = lhs.size();
+	result.success = false;
+	result.best_ms = 0.0f;
+	result.avg_ms = 0.0f;
+	result.mismatch_count = static_cast<int>(expected_match.size());
+	if (size == 0 || size != rhs.size() || size != expected_match.size() || size % 256 != 0 || warmup_runs < 0 || measured_runs <= 0) {
+		fprintf(stderr, "ERROR Checked : invalid kernel benchmark input\n");
+		return false;
+	}
+
+	float* lhs_descriptor_host = nullptr;
+	float* rhs_descriptor_host = nullptr;
+	float* lhs_descriptor_device = nullptr;
+	float* rhs_descriptor_device = nullptr;
+	float* distance_matrix = nullptr;
+	float* device_score = nullptr;
+	int* host_index = nullptr;
+	int* device_index = nullptr;
+	cudaEvent_t start = nullptr;
+	cudaEvent_t stop = nullptr;
+	dim3 distance_thread(32, 8);
+	dim3 distance_block(size / 32, 1);
+	dim3 close_thread(32, 32);
+	dim3 close_block(size / 32, 1);
+	bool success = false;
+	float best_ms = 1e30f;
+	float sum_ms = 0.0f;
+
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(float) * size * 128))) goto cleanup;
+	CopyDescriptorToPinnedMemory(lhs, lhs_descriptor_host);
+	CopyDescriptorToPinnedMemory(rhs, rhs_descriptor_host);
+	if (!CUDAErrorCheck(cudaMalloc(&lhs_descriptor_device, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(float) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&distance_matrix, sizeof(float) * size * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&host_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(float) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+
+	for (int i = 0; i < warmup_runs; i++) {
+		ComputeDistanceMatrixV1<<<distance_block, distance_thread>>>(lhs_descriptor_device, rhs_descriptor_device, distance_matrix, size);
+		CloseElementV1<<<close_block, close_thread>>>(distance_matrix, size, device_score, device_index);
+	}
+	if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+	if (!CUDAErrorCheck(cudaDeviceSynchronize())) goto cleanup;
+
+	if (!CUDAErrorCheck(cudaEventCreate(&start))) goto cleanup;
+	if (!CUDAErrorCheck(cudaEventCreate(&stop))) goto cleanup;
+	for (int i = 0; i < measured_runs; i++) {
+		float elapsed_ms = 0.0f;
+		if (!CUDAErrorCheck(cudaEventRecord(start, 0))) goto cleanup;
+		ComputeDistanceMatrixV1<<<distance_block, distance_thread>>>(lhs_descriptor_device, rhs_descriptor_device, distance_matrix, size);
+		CloseElementV1<<<close_block, close_thread>>>(distance_matrix, size, device_score, device_index);
+		if (!CUDAErrorCheck(cudaEventRecord(stop, 0))) goto cleanup;
+		if (!CUDAErrorCheck(cudaEventSynchronize(stop))) goto cleanup;
+		if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+		if (!CUDAErrorCheck(cudaEventElapsedTime(&elapsed_ms, start, stop))) goto cleanup;
+		sum_ms += elapsed_ms;
+		if (elapsed_ms < best_ms) {
+			best_ms = elapsed_ms;
+		}
+	}
+
+	if (!CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost))) goto cleanup;
+	result.mismatch_count = 0;
+	for (size_t i = 0; i < size; i++) {
+		if (host_index[i] != expected_match[i]) {
+			result.mismatch_count++;
+		}
+	}
+	result.best_ms = best_ms;
+	result.avg_ms = sum_ms / static_cast<float>(measured_runs);
+	result.success = result.mismatch_count == 0;
+	success = result.success;
+
+cleanup:
+	if (start) cudaEventDestroy(start);
+	if (stop) cudaEventDestroy(stop);
+	if (lhs_descriptor_host) cudaFreeHost(lhs_descriptor_host);
+	if (rhs_descriptor_host) cudaFreeHost(rhs_descriptor_host);
+	if (lhs_descriptor_device) cudaFree(lhs_descriptor_device);
+	if (rhs_descriptor_device) cudaFree(rhs_descriptor_device);
+	if (distance_matrix) cudaFree(distance_matrix);
+	if (device_score) cudaFree(device_score);
+	if (device_index) cudaFree(device_index);
+	if (host_index) cudaFreeHost(host_index);
+	return success;
+}
+
+bool BenchmarkKernelV2(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkFloatKernel(lhs, rhs, expected_match, warmup_runs, measured_runs, result, ComputeNearestNeighbor, dim3(lhs.size() / 32, 1), dim3(32, 8));
+}
+
+bool BenchmarkKernelV3(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkFloatKernel(lhs, rhs, expected_match, warmup_runs, measured_runs, result, ComputeNearestNeighborV3, dim3(lhs.size() / 32, 1), dim3(32, 8));
+}
+
+bool BenchmarkKernelV4(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkFloatKernel(lhs, rhs, expected_match, warmup_runs, measured_runs, result, ComputeNearestNeighborV4, dim3(lhs.size() / 8, 1), dim3(256, 1));
+}
+
+bool BenchmarkKernelV5(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkFloatKernel(lhs, rhs, expected_match, warmup_runs, measured_runs, result, ComputeNearestNeighborV5c, dim3(lhs.size() / 32, 1), dim3(32, 8));
+}
+
+bool BenchmarkKernelV5a(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkFloatKernel(lhs, rhs, expected_match, warmup_runs, measured_runs, result, ComputeNearestNeighborV5a, dim3(lhs.size() / 32, 1), dim3(32, 8));
+}
+
+bool BenchmarkKernelV5b(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkFloatKernel(lhs, rhs, expected_match, warmup_runs, measured_runs, result, ComputeNearestNeighborV5b, dim3(lhs.size() / 32, 1), dim3(32, 8));
+}
+
+bool BenchmarkKernelV5c(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkFloatKernel(lhs, rhs, expected_match, warmup_runs, measured_runs, result, ComputeNearestNeighborV5c, dim3(lhs.size() / 32, 1), dim3(32, 8));
+}
+
+bool BenchmarkKernelV6(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkFloatKernel(lhs, rhs, expected_match, warmup_runs, measured_runs, result, ComputeNearestNeighborV6, dim3(lhs.size() / 32, 1), dim3(32, 8));
+}
+
+bool BenchmarkKernelV7(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkFloatKernel(lhs, rhs, expected_match, warmup_runs, measured_runs, result, ComputeNearestNeighborV7, dim3(lhs.size() / 32, 1), dim3(32, 8));
+}
+
+bool BenchmarkKernelV8(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	size_t size = lhs.size();
+	result.success = false;
+	result.best_ms = 0.0f;
+	result.avg_ms = 0.0f;
+	result.mismatch_count = static_cast<int>(expected_match.size());
+	if (size == 0 || size != rhs.size() || size != expected_match.size() || size % 32 != 0 || warmup_runs < 0 || measured_runs <= 0) {
+		fprintf(stderr, "ERROR Checked : invalid kernel benchmark input\n");
+		return false;
+	}
+
+	__half* lhs_descriptor_host = nullptr;
+	__half* rhs_descriptor_host = nullptr;
+	__half* lhs_descriptor_device = nullptr;
+	__half* rhs_descriptor_device = nullptr;
+	float* device_score = nullptr;
+	int* host_index = nullptr;
+	int* device_index = nullptr;
+	cudaEvent_t start = nullptr;
+	cudaEvent_t stop = nullptr;
+	dim3 thread(32, 8);
+	dim3 block(size / 32, 1);
+	bool success = false;
+	float best_ms = 1e30f;
+	float sum_ms = 0.0f;
+	size_t offset = 0;
+
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(__half) * size * 128))) goto cleanup;
+	for (const Descriptor& descriptor : lhs) {
+		for (float value : descriptor) {
+			lhs_descriptor_host[offset++] = __float2half_rn(value);
+		}
+	}
+	offset = 0;
+	for (const Descriptor& descriptor : rhs) {
+		for (float value : descriptor) {
+			rhs_descriptor_host[offset++] = __float2half_rn(value);
+		}
+	}
+
+	if (!CUDAErrorCheck(cudaMalloc(&lhs_descriptor_device, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&host_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+
+	for (int i = 0; i < warmup_runs; i++) {
+		ComputeNearestNeighborV8<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, device_score, device_index, size);
+	}
+	if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+	if (!CUDAErrorCheck(cudaDeviceSynchronize())) goto cleanup;
+
+	if (!CUDAErrorCheck(cudaEventCreate(&start))) goto cleanup;
+	if (!CUDAErrorCheck(cudaEventCreate(&stop))) goto cleanup;
+	for (int i = 0; i < measured_runs; i++) {
+		float elapsed_ms = 0.0f;
+		if (!CUDAErrorCheck(cudaEventRecord(start, 0))) goto cleanup;
+		ComputeNearestNeighborV8<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, device_score, device_index, size);
+		if (!CUDAErrorCheck(cudaEventRecord(stop, 0))) goto cleanup;
+		if (!CUDAErrorCheck(cudaEventSynchronize(stop))) goto cleanup;
+		if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+		if (!CUDAErrorCheck(cudaEventElapsedTime(&elapsed_ms, start, stop))) goto cleanup;
+		sum_ms += elapsed_ms;
+		if (elapsed_ms < best_ms) {
+			best_ms = elapsed_ms;
+		}
+	}
+
+	if (!CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost))) goto cleanup;
+	result.mismatch_count = 0;
+	for (size_t i = 0; i < size; i++) {
+		if (host_index[i] != expected_match[i]) {
+			result.mismatch_count++;
+		}
+	}
+	result.best_ms = best_ms;
+	result.avg_ms = sum_ms / static_cast<float>(measured_runs);
+	result.success = result.mismatch_count == 0;
+	success = result.success;
+
+cleanup:
+	if (start) cudaEventDestroy(start);
+	if (stop) cudaEventDestroy(stop);
+	if (lhs_descriptor_host) cudaFreeHost(lhs_descriptor_host);
+	if (rhs_descriptor_host) cudaFreeHost(rhs_descriptor_host);
+	if (lhs_descriptor_device) cudaFree(lhs_descriptor_device);
+	if (rhs_descriptor_device) cudaFree(rhs_descriptor_device);
+	if (device_score) cudaFree(device_score);
+	if (device_index) cudaFree(device_index);
+	if (host_index) cudaFreeHost(host_index);
+	return success;
+}
+
+bool BenchmarkKernelV9(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	size_t size = lhs.size();
+	result.success = false;
+	result.best_ms = 0.0f;
+	result.avg_ms = 0.0f;
+	result.mismatch_count = static_cast<int>(expected_match.size());
+	if (size == 0 || size != rhs.size() || size != expected_match.size() || size % 32 != 0 || warmup_runs < 0 || measured_runs <= 0) {
+		fprintf(stderr, "ERROR Checked : invalid kernel benchmark input\n");
+		return false;
+	}
+
+	__half* lhs_descriptor_host = nullptr;
+	__half* rhs_descriptor_host = nullptr;
+	float* lhs_norm_host = nullptr;
+	float* rhs_norm_host = nullptr;
+	__half* lhs_descriptor_device = nullptr;
+	__half* rhs_descriptor_device = nullptr;
+	float* lhs_norm_device = nullptr;
+	float* rhs_norm_device = nullptr;
+	float* device_score = nullptr;
+	int* host_index = nullptr;
+	int* device_index = nullptr;
+	cudaEvent_t start = nullptr;
+	cudaEvent_t stop = nullptr;
+	dim3 thread(128);
+	dim3 block(size / 16);
+	bool success = false;
+	float best_ms = 1e30f;
+	float sum_ms = 0.0f;
+
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_norm_host, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_norm_host, sizeof(float) * size))) goto cleanup;
+	for (size_t i = 0; i < size; i++) {
+		float lhs_norm = 0.0f;
+		float rhs_norm = 0.0f;
+		for (int k = 0; k < 128; k++) {
+			__half lhs_half = __float2half_rn(lhs[i][k]);
+			__half rhs_half = __float2half_rn(rhs[i][k]);
+			lhs_descriptor_host[i * 128 + k] = lhs_half;
+			rhs_descriptor_host[i * 128 + k] = rhs_half;
+			float lhs_value = __half2float(lhs_half);
+			float rhs_value = __half2float(rhs_half);
+			lhs_norm += lhs_value * lhs_value;
+			rhs_norm += rhs_value * rhs_value;
+		}
+		lhs_norm_host[i] = lhs_norm;
+		rhs_norm_host[i] = rhs_norm;
+	}
+
+	if (!CUDAErrorCheck(cudaMalloc(&lhs_descriptor_device, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&rhs_descriptor_device, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&lhs_norm_device, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&rhs_norm_device, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_score, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&device_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&host_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(lhs_descriptor_device, lhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(rhs_descriptor_device, rhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(lhs_norm_device, lhs_norm_host, sizeof(float) * size, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(rhs_norm_device, rhs_norm_host, sizeof(float) * size, cudaMemcpyHostToDevice))) goto cleanup;
+
+	for (int i = 0; i < warmup_runs; i++) {
+		ComputeNearestNeighborV9WMMA<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, lhs_norm_device, rhs_norm_device, device_score, device_index, size);
+	}
+	if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+	if (!CUDAErrorCheck(cudaDeviceSynchronize())) goto cleanup;
+
+	if (!CUDAErrorCheck(cudaEventCreate(&start))) goto cleanup;
+	if (!CUDAErrorCheck(cudaEventCreate(&stop))) goto cleanup;
+	for (int i = 0; i < measured_runs; i++) {
+		float elapsed_ms = 0.0f;
+		if (!CUDAErrorCheck(cudaEventRecord(start, 0))) goto cleanup;
+		ComputeNearestNeighborV9WMMA<<<block, thread>>>(lhs_descriptor_device, rhs_descriptor_device, lhs_norm_device, rhs_norm_device, device_score, device_index, size);
+		if (!CUDAErrorCheck(cudaEventRecord(stop, 0))) goto cleanup;
+		if (!CUDAErrorCheck(cudaEventSynchronize(stop))) goto cleanup;
+		if (!CUDAErrorCheck(cudaGetLastError())) goto cleanup;
+		if (!CUDAErrorCheck(cudaEventElapsedTime(&elapsed_ms, start, stop))) goto cleanup;
+		sum_ms += elapsed_ms;
+		if (elapsed_ms < best_ms) {
+			best_ms = elapsed_ms;
+		}
+	}
+
+	if (!CUDAErrorCheck(cudaMemcpy(host_index, device_index, sizeof(int) * size, cudaMemcpyDeviceToHost))) goto cleanup;
+	result.mismatch_count = 0;
+	for (size_t i = 0; i < size; i++) {
+		if (host_index[i] != expected_match[i]) {
+			result.mismatch_count++;
+		}
+	}
+	result.best_ms = best_ms;
+	result.avg_ms = sum_ms / static_cast<float>(measured_runs);
+	result.success = result.mismatch_count == 0;
+	success = result.success;
+
+cleanup:
+	if (start) cudaEventDestroy(start);
+	if (stop) cudaEventDestroy(stop);
+	if (lhs_descriptor_host) cudaFreeHost(lhs_descriptor_host);
+	if (rhs_descriptor_host) cudaFreeHost(rhs_descriptor_host);
+	if (lhs_norm_host) cudaFreeHost(lhs_norm_host);
+	if (rhs_norm_host) cudaFreeHost(rhs_norm_host);
+	if (lhs_descriptor_device) cudaFree(lhs_descriptor_device);
+	if (rhs_descriptor_device) cudaFree(rhs_descriptor_device);
+	if (lhs_norm_device) cudaFree(lhs_norm_device);
+	if (rhs_norm_device) cudaFree(rhs_norm_device);
+	if (device_score) cudaFree(device_score);
+	if (device_index) cudaFree(device_index);
+	if (host_index) cudaFreeHost(host_index);
+	return success;
+}
+
 bool Match(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
 	return MatchV5(lhs, rhs, match_result);
 }
