@@ -87,25 +87,27 @@ Memory bandwidth: ~192.03 GB/s
 ```
 
 ```text
-version  time  estimated compute  estimated bandwidth
-v1        74 ms  1392.96 GFLOP/s    87.17 GB/s
-v2        77 ms  1338.69 GFLOP/s    55.89 GB/s
-v3        65 ms  1585.83 GFLOP/s    66.21 GB/s
-v4       298 ms   345.90 GFLOP/s    57.68 GB/s
-v5        98 ms  1051.83 GFLOP/s    43.91 GB/s
-v5a       61 ms  1689.82 GFLOP/s    70.55 GB/s
-v5b       63 ms  1636.18 GFLOP/s    68.31 GB/s
-v5c      102 ms  1010.58 GFLOP/s    42.19 GB/s
-v6        66 ms  1561.81 GFLOP/s    65.20 GB/s
-v7        59 ms  1747.11 GFLOP/s    72.94 GB/s
-v8       112 ms   920.35 GFLOP/s    19.21 GB/s
-v9       135 ms   515.00 GFLOP/s    32.34 GB/s
+version  wall best  wall avg  device best  estimated compute  estimated bandwidth
+v1        81.555 ms   87.658 ms   81.562 ms  1263.93 GFLOP/s    79.10 GB/s
+v2        65.470 ms   69.913 ms   65.479 ms  1574.45 GFLOP/s    65.73 GB/s
+v3        60.688 ms   66.499 ms   60.694 ms  1698.51 GFLOP/s    70.91 GB/s
+v4       312.868 ms  316.664 ms  312.873 ms   329.47 GFLOP/s    54.94 GB/s
+v5       107.369 ms  108.835 ms  107.374 ms   960.04 GFLOP/s    40.08 GB/s
+v5a       62.874 ms   67.123 ms   62.883 ms  1639.47 GFLOP/s    68.44 GB/s
+v5b       64.141 ms   66.917 ms   64.146 ms  1607.08 GFLOP/s    67.09 GB/s
+v5c      107.348 ms  109.202 ms  107.355 ms   960.24 GFLOP/s    40.09 GB/s
+v6        63.917 ms   68.260 ms   63.845 ms  1612.70 GFLOP/s    67.33 GB/s
+v7        65.120 ms   66.384 ms   65.127 ms  1582.90 GFLOP/s    66.08 GB/s
+v8       115.316 ms  118.791 ms  115.320 ms   893.88 GFLOP/s    18.66 GB/s
+v9       125.417 ms  126.783 ms  125.422 ms   554.35 GFLOP/s    34.81 GB/s
 ```
 
-All runs reported 0 mismatches. The compute and bandwidth columns are benchmark
-estimates based on the algorithm's modeled FLOPs and memory traffic, not Nsight
-hardware counters. The benchmark also prints CUDA event device elapsed time and
-device-side estimated compute/bandwidth for each version.
+Each version is measured with 1 warmup run and 5 measured runs. All runs
+reported 0 mismatches. The compute and bandwidth columns use wall-best time and
+are benchmark estimates based on the algorithm's modeled FLOPs and memory
+traffic, not Nsight hardware counters. The benchmark also prints CUDA event
+device average/best time and device-side estimated compute/bandwidth for each
+version.
 
 ## Build
 
