@@ -23,7 +23,7 @@ struct BenchmarkResult {
 double EstimatedFlops(const std::string& name, size_t descriptor_num) {
     double n = static_cast<double>(descriptor_num);
     double k = 128.0;
-    if (name == "v9") {
+    if (name == "v9" || name == "v10") {
         return n * n * (2.0 * k + 3.0);
     }
     return n * n * (3.0 * k);
@@ -43,7 +43,7 @@ double EstimatedMemoryBytes(const std::string& name, size_t descriptor_num) {
     if (name == "v8") {
         return (n / 32.0) * (32.0 * k * 2.0 + n * k * 2.0);
     }
-    if (name == "v9") {
+    if (name == "v9" || name == "v10") {
         double descriptor_scan = (n / 16.0) * (16.0 * k * 2.0 + n * k * 2.0);
         double norm_scan = (n / 16.0) * (16.0 * 4.0 + n * 4.0);
         return descriptor_scan + norm_scan;
@@ -106,6 +106,7 @@ void RunKernelOnlyBenchmarks(const std::vector<Descriptor>& lhs,
     KernelBenchmarkResult v7;
     KernelBenchmarkResult v8;
     KernelBenchmarkResult v9;
+    KernelBenchmarkResult v10;
 
     std::cout << "kernel-only measured runs : " << measured_runs << " + " << warmup_runs << " warmup" << std::endl;
     BenchmarkKernelV1(lhs, rhs, expected_match, warmup_runs, measured_runs, v1);
@@ -132,6 +133,77 @@ void RunKernelOnlyBenchmarks(const std::vector<Descriptor>& lhs,
     PrintKernelMetrics("v8", v8, descriptor_num);
     BenchmarkKernelV9(lhs, rhs, expected_match, warmup_runs, measured_runs, v9);
     PrintKernelMetrics("v9", v9, descriptor_num);
+    BenchmarkKernelV10(lhs, rhs, expected_match, warmup_runs, measured_runs, v10);
+    PrintKernelMetrics("v10", v10, descriptor_num);
+}
+
+void RunV10PersistentBenchmark(const std::vector<Descriptor>& lhs,
+                               const std::vector<Descriptor>& rhs,
+                               const std::vector<int>& expected_match,
+                               size_t descriptor_num) {
+    const int warmup_runs = 1;
+    const int measured_runs = 5;
+    MatchV10Context* context = nullptr;
+
+    auto create_start = std::chrono::high_resolution_clock::now();
+    bool created = CreateMatchV10Context(lhs, rhs, &context);
+    auto create_end = std::chrono::high_resolution_clock::now();
+    double create_ms = std::chrono::duration<double, std::milli>(create_end - create_start).count();
+    std::cout << "v10 persistent create time : " << std::fixed << std::setprecision(3) << create_ms << " ms" << std::endl;
+    if (!created) {
+        std::cout << "v10 persistent benchmark failed" << std::endl;
+        return;
+    }
+
+    bool success = true;
+    int mismatch_count = 0;
+    double wall_sum_ms = 0.0;
+    double wall_best_ms = std::numeric_limits<double>::max();
+    for (int run = 0; run < warmup_runs + measured_runs; run++) {
+        std::vector<std::pair<int, int>> match_result;
+        auto start = std::chrono::high_resolution_clock::now();
+        bool run_success = RunMatchV10Context(context, match_result);
+        auto end = std::chrono::high_resolution_clock::now();
+        double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+        int run_mismatch_count = 0;
+        if (run_success) {
+            for (std::pair<int, int> p : match_result) {
+                if (p.second != expected_match[p.first]) {
+                    run_mismatch_count++;
+                }
+            }
+        } else {
+            run_mismatch_count = static_cast<int>(expected_match.size());
+        }
+        success = success && run_success;
+        if (run_mismatch_count > mismatch_count) {
+            mismatch_count = run_mismatch_count;
+        }
+        if (run >= warmup_runs) {
+            wall_sum_ms += elapsed_ms;
+            if (elapsed_ms < wall_best_ms) {
+                wall_best_ms = elapsed_ms;
+            }
+        }
+    }
+
+    double wall_avg_ms = wall_sum_ms / static_cast<double>(measured_runs);
+    double seconds = wall_best_ms / 1000.0;
+    double gflops = EstimatedFlops("v10", descriptor_num) / seconds / 1e9;
+    double bandwidth = EstimatedMemoryBytes("v10", descriptor_num) / seconds / 1e9;
+
+    std::cout << "v10 persistent measured runs : " << measured_runs << " + " << warmup_runs << " warmup" << std::endl;
+    std::cout << "v10 persistent mismatch count : " << mismatch_count << std::endl;
+    if (!success) {
+        std::cout << "v10 persistent match failed" << std::endl;
+    }
+    std::cout << "v10 persistent run best : " << std::fixed << std::setprecision(3) << wall_best_ms << " ms" << std::endl;
+    std::cout << "v10 persistent run avg : " << std::fixed << std::setprecision(3) << wall_avg_ms << " ms" << std::endl;
+    std::cout << "v10 persistent estimated compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
+    std::cout << "v10 persistent estimated bandwidth : " << std::fixed << std::setprecision(2) << bandwidth << " GB/s" << std::endl;
+
+    DestroyMatchV10Context(context);
 }
 
 BenchmarkResult RunBenchmark(const std::string& name,
@@ -254,6 +326,7 @@ void MATCH() {
     BenchmarkResult v7 = RunBenchmark("v7", MatchV7, lhs, rhs, expected_match, descriptor_num);
     BenchmarkResult v8 = RunBenchmark("v8", MatchV8, lhs, rhs, expected_match, descriptor_num);
     BenchmarkResult v9 = RunBenchmark("v9", MatchV9, lhs, rhs, expected_match, descriptor_num);
+    BenchmarkResult v10 = RunBenchmark("v10", MatchV10, lhs, rhs, expected_match, descriptor_num);
 
     if (v1.success && v2.success && v1.mismatch_count == 0 && v2.mismatch_count == 0 && v2.wall_best_ms > 0) {
         double speedup = static_cast<double>(v1.wall_best_ms) / static_cast<double>(v2.wall_best_ms);
@@ -323,8 +396,13 @@ void MATCH() {
         double speedup = static_cast<double>(v6.wall_best_ms) / static_cast<double>(v9.wall_best_ms);
         std::cout << "v9 speedup over v6 : " << speedup << "x" << std::endl;
     }
+    if (v9.success && v10.success && v9.mismatch_count == 0 && v10.mismatch_count == 0 && v10.wall_best_ms > 0) {
+        double speedup = static_cast<double>(v9.wall_best_ms) / static_cast<double>(v10.wall_best_ms);
+        std::cout << "v10 speedup over v9 : " << speedup << "x" << std::endl;
+    }
 
     RunKernelOnlyBenchmarks(lhs, rhs, expected_match, descriptor_num);
+    RunV10PersistentBenchmark(lhs, rhs, expected_match, descriptor_num);
 }
 int main(int argc, char** argv) {
     MATCH();

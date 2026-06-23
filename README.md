@@ -28,6 +28,17 @@ bool MatchV6(...);
 bool MatchV7(...);
 bool MatchV8(...);
 bool MatchV9(...);
+bool MatchV10(...);
+```
+
+`v10` also exposes a persistent matcher context for repeated matching without
+rebuilding FP16 descriptors and device buffers every call:
+
+```cpp
+struct MatchV10Context;
+bool CreateMatchV10Context(...);
+bool RunMatchV10Context(...);
+void DestroyMatchV10Context(...);
 ```
 
 `Descriptor` is `std::array<float, 128>`. The current CUDA matcher expects
@@ -68,6 +79,10 @@ bool MatchV9(...);
   `16 x 16` B subtiles with WMMA per scan step. Distances are recovered from
   `||a||² + ||b||² - 2ABᵀ`, and top-1 is updated immediately without
   materializing the full `N x N` dot matrix.
+- `v10`: persistent v9 matcher context. FP16 descriptor conversion, norm
+  computation, device allocation, and H2D copies are done once during context
+  creation. Repeated runs launch the WMMA top-1 kernel and copy back only the
+  best-index output.
 
 On an NVIDIA GeForce RTX 3050 Ti Laptop GPU, the matcher benchmark for
 `16,384 x 16,384` descriptors produced these sample runs:
@@ -88,18 +103,19 @@ Memory bandwidth: ~192.03 GB/s
 
 ```text
 version  wall best  wall avg  device best  estimated compute  estimated bandwidth
-v1        87.207 ms   90.148 ms   87.215 ms  1182.01 GFLOP/s    73.97 GB/s
-v2        65.358 ms   70.674 ms   65.365 ms  1577.16 GFLOP/s    65.84 GB/s
-v3        66.277 ms   68.331 ms   66.284 ms  1555.28 GFLOP/s    64.93 GB/s
-v4       318.585 ms  321.221 ms  318.592 ms   323.55 GFLOP/s    53.95 GB/s
-v5       101.796 ms  107.189 ms  101.803 ms  1012.60 GFLOP/s    42.27 GB/s
-v5a       67.537 ms   67.985 ms   67.545 ms  1526.26 GFLOP/s    63.72 GB/s
-v5b       65.541 ms   68.874 ms   65.548 ms  1572.74 GFLOP/s    65.66 GB/s
-v5c      106.434 ms  109.227 ms  106.440 ms   968.48 GFLOP/s    40.43 GB/s
-v6        68.302 ms   71.027 ms   68.306 ms  1509.18 GFLOP/s    63.01 GB/s
-v7        64.770 ms   67.044 ms   64.775 ms  1591.46 GFLOP/s    66.44 GB/s
-v8       122.433 ms  124.483 ms  122.438 ms   841.92 GFLOP/s    17.57 GB/s
-v9       124.043 ms  125.533 ms  124.046 ms   560.49 GFLOP/s    35.20 GB/s
+v1        85.034 ms   89.621 ms   85.037 ms  1212.22 GFLOP/s    75.86 GB/s
+v2        67.525 ms   71.835 ms   67.532 ms  1526.53 GFLOP/s    63.73 GB/s
+v3        65.854 ms   74.328 ms   65.856 ms  1565.28 GFLOP/s    65.35 GB/s
+v4       308.759 ms  314.538 ms  308.767 ms   333.85 GFLOP/s    55.67 GB/s
+v5       104.893 ms  106.797 ms  104.901 ms   982.71 GFLOP/s    41.03 GB/s
+v5a       61.298 ms   66.410 ms   61.303 ms  1681.60 GFLOP/s    70.20 GB/s
+v5b       66.539 ms   67.639 ms   66.544 ms  1549.15 GFLOP/s    64.67 GB/s
+v5c      105.513 ms  108.305 ms  105.517 ms   976.94 GFLOP/s    40.79 GB/s
+v6        66.290 ms   67.780 ms   66.294 ms  1554.98 GFLOP/s    64.92 GB/s
+v7        62.045 ms   64.096 ms   62.049 ms  1661.37 GFLOP/s    69.36 GB/s
+v8       113.970 ms  116.848 ms  113.974 ms   904.44 GFLOP/s    18.88 GB/s
+v9       128.293 ms  132.160 ms  128.297 ms   541.92 GFLOP/s    34.03 GB/s
+v10      129.199 ms  135.307 ms  129.203 ms   538.12 GFLOP/s    33.80 GB/s
 ```
 
 Each version is measured with 1 warmup run and 5 measured runs. All runs
@@ -115,24 +131,36 @@ launches are timed with CUDA events:
 
 ```text
 version  kernel best  kernel avg  estimated compute  estimated bandwidth
-v1        60.311 ms    63.436 ms  1709.14 GFLOP/s   106.96 GB/s
-v2        58.186 ms    63.587 ms  1771.56 GFLOP/s    73.96 GB/s
-v3        57.428 ms    60.955 ms  1794.93 GFLOP/s    74.93 GB/s
-v4       306.674 ms   312.692 ms   336.12 GFLOP/s    56.05 GB/s
-v5        99.880 ms   102.917 ms  1032.03 GFLOP/s    43.09 GB/s
-v5a       56.109 ms    60.939 ms  1837.12 GFLOP/s    76.70 GB/s
-v5b       56.189 ms    60.781 ms  1834.51 GFLOP/s    76.59 GB/s
-v5c       94.597 ms    99.890 ms  1089.67 GFLOP/s    45.49 GB/s
-v6        55.704 ms    59.456 ms  1850.50 GFLOP/s    77.25 GB/s
-v7        52.630 ms    57.470 ms  1958.58 GFLOP/s    81.77 GB/s
-v8        49.691 ms    56.410 ms  2074.41 GFLOP/s    43.30 GB/s
-v9        19.715 ms    24.447 ms  3526.48 GFLOP/s   221.47 GB/s
+v1        57.584 ms    60.237 ms  1790.08 GFLOP/s   112.03 GB/s
+v2        56.878 ms    61.422 ms  1812.28 GFLOP/s    75.66 GB/s
+v3        54.403 ms    58.413 ms  1894.73 GFLOP/s    79.10 GB/s
+v4       293.575 ms   302.951 ms   351.12 GFLOP/s    58.55 GB/s
+v5        96.031 ms    98.830 ms  1073.40 GFLOP/s    44.81 GB/s
+v5a       57.008 ms    59.526 ms  1808.15 GFLOP/s    75.49 GB/s
+v5b       56.396 ms    59.699 ms  1827.78 GFLOP/s    76.31 GB/s
+v5c       92.117 ms    99.334 ms  1119.00 GFLOP/s    46.72 GB/s
+v6        55.529 ms    59.853 ms  1856.30 GFLOP/s    77.50 GB/s
+v7        55.146 ms    58.132 ms  1869.19 GFLOP/s    78.03 GB/s
+v8        51.559 ms    57.772 ms  1999.23 GFLOP/s    41.73 GB/s
+v9        20.703 ms    24.220 ms  3358.16 GFLOP/s   210.90 GB/s
+v10       20.256 ms    24.171 ms  3432.34 GFLOP/s   215.56 GB/s
 ```
 
 Kernel-only timing shows the WMMA/Tensor Core v9 kernel is the fastest path once
 host conversion, allocation, H2D copies, D2H copies, and per-call setup are
 removed. The remaining end-to-end bottleneck for v9 is the preparation path, not
 the matching kernel itself.
+
+The v10 persistent context removes that repeated preparation from steady-state
+matching:
+
+```text
+v10 persistent create time: 121.157 ms
+v10 persistent run best: 21.605 ms
+v10 persistent run avg: 23.884 ms
+v10 persistent estimated compute: 3218.00 GFLOP/s
+v10 persistent estimated bandwidth: 202.10 GB/s
+```
 
 ## Build
 

@@ -1718,6 +1718,138 @@ cleanup:
 	return success;
 }
 
+struct MatchV10Context {
+	size_t size;
+	__half* lhs_descriptor_device;
+	__half* rhs_descriptor_device;
+	float* lhs_norm_device;
+	float* rhs_norm_device;
+	float* device_score;
+	int* device_index;
+	int* host_index;
+};
+
+bool CreateMatchV10Context(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, MatchV10Context** context) {
+	size_t size = lhs.size();
+	if (!context || size == 0 || size != rhs.size() || size % 32 != 0) {
+		fprintf(stderr, "ERROR Checked : invalid v10 context input\n");
+		return false;
+	}
+	*context = nullptr;
+
+	MatchV10Context* ctx = nullptr;
+	__half* lhs_descriptor_host = nullptr;
+	__half* rhs_descriptor_host = nullptr;
+	float* lhs_norm_host = nullptr;
+	float* rhs_norm_host = nullptr;
+	bool success = false;
+
+	ctx = new MatchV10Context();
+	ctx->size = size;
+	ctx->lhs_descriptor_device = nullptr;
+	ctx->rhs_descriptor_device = nullptr;
+	ctx->lhs_norm_device = nullptr;
+	ctx->rhs_norm_device = nullptr;
+	ctx->device_score = nullptr;
+	ctx->device_index = nullptr;
+	ctx->host_index = nullptr;
+
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_descriptor_host, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_descriptor_host, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&lhs_norm_host, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&rhs_norm_host, sizeof(float) * size))) goto cleanup;
+	for (size_t i = 0; i < size; i++) {
+		float lhs_norm = 0.0f;
+		float rhs_norm = 0.0f;
+		for (int k = 0; k < 128; k++) {
+			__half lhs_half = __float2half_rn(lhs[i][k]);
+			__half rhs_half = __float2half_rn(rhs[i][k]);
+			lhs_descriptor_host[i * 128 + k] = lhs_half;
+			rhs_descriptor_host[i * 128 + k] = rhs_half;
+			float lhs_value = __half2float(lhs_half);
+			float rhs_value = __half2float(rhs_half);
+			lhs_norm += lhs_value * lhs_value;
+			rhs_norm += rhs_value * rhs_value;
+		}
+		lhs_norm_host[i] = lhs_norm;
+		rhs_norm_host[i] = rhs_norm;
+	}
+
+	if (!CUDAErrorCheck(cudaMalloc(&ctx->lhs_descriptor_device, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&ctx->rhs_descriptor_device, sizeof(__half) * size * 128))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&ctx->lhs_norm_device, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&ctx->rhs_norm_device, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&ctx->device_score, sizeof(float) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMalloc(&ctx->device_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMallocHost(&ctx->host_index, sizeof(int) * size))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(ctx->lhs_descriptor_device, lhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(ctx->rhs_descriptor_device, rhs_descriptor_host, sizeof(__half) * size * 128, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(ctx->lhs_norm_device, lhs_norm_host, sizeof(float) * size, cudaMemcpyHostToDevice))) goto cleanup;
+	if (!CUDAErrorCheck(cudaMemcpy(ctx->rhs_norm_device, rhs_norm_host, sizeof(float) * size, cudaMemcpyHostToDevice))) goto cleanup;
+
+	*context = ctx;
+	ctx = nullptr;
+	success = true;
+
+cleanup:
+	if (lhs_descriptor_host) cudaFreeHost(lhs_descriptor_host);
+	if (rhs_descriptor_host) cudaFreeHost(rhs_descriptor_host);
+	if (lhs_norm_host) cudaFreeHost(lhs_norm_host);
+	if (rhs_norm_host) cudaFreeHost(rhs_norm_host);
+	if (ctx) DestroyMatchV10Context(ctx);
+	return success;
+}
+
+bool RunMatchV10Context(MatchV10Context* context, std::vector<std::pair<int, int>>& match_result) {
+	if (!context || context->size == 0) {
+		fprintf(stderr, "ERROR Checked : invalid v10 context\n");
+		return false;
+	}
+	match_result.clear();
+	dim3 thread(128);
+	dim3 block(context->size / 16);
+	ComputeNearestNeighborV9WMMA<<<block, thread>>>(context->lhs_descriptor_device, context->rhs_descriptor_device, context->lhs_norm_device, context->rhs_norm_device, context->device_score, context->device_index, context->size);
+	if (!CUDAErrorCheck(cudaGetLastError())) {
+		return false;
+	}
+	if (!CUDAErrorCheck(cudaMemcpy(context->host_index, context->device_index, sizeof(int) * context->size, cudaMemcpyDeviceToHost))) {
+		return false;
+	}
+	for (size_t i = 0; i < context->size; i++) {
+		match_result.push_back(std::pair<int, int>(static_cast<int>(i), context->host_index[i]));
+	}
+	return true;
+}
+
+void DestroyMatchV10Context(MatchV10Context* context) {
+	if (!context) {
+		return;
+	}
+	if (context->lhs_descriptor_device) cudaFree(context->lhs_descriptor_device);
+	if (context->rhs_descriptor_device) cudaFree(context->rhs_descriptor_device);
+	if (context->lhs_norm_device) cudaFree(context->lhs_norm_device);
+	if (context->rhs_norm_device) cudaFree(context->rhs_norm_device);
+	if (context->device_score) cudaFree(context->device_score);
+	if (context->device_index) cudaFree(context->device_index);
+	if (context->host_index) cudaFreeHost(context->host_index);
+	delete context;
+}
+
+bool MatchV10(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
+	MatchV10Context* context = nullptr;
+	bool success = false;
+	if (!CreateMatchV10Context(lhs, rhs, &context)) {
+		match_result.clear();
+		return false;
+	}
+	success = RunMatchV10Context(context, match_result);
+	DestroyMatchV10Context(context);
+	if (!success) {
+		match_result.clear();
+	}
+	return success;
+}
+
 template <typename KernelFn>
 bool BenchmarkFloatKernel(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result, KernelFn kernel, dim3 block, dim3 thread) {
 	size_t size = lhs.size();
@@ -2138,6 +2270,10 @@ cleanup:
 	if (device_index) cudaFree(device_index);
 	if (host_index) cudaFreeHost(host_index);
 	return success;
+}
+
+bool BenchmarkKernelV10(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs,const std::vector<int>& expected_match, int warmup_runs, int measured_runs, KernelBenchmarkResult& result) {
+	return BenchmarkKernelV9(lhs, rhs, expected_match, warmup_runs, measured_runs, result);
 }
 
 bool Match(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& rhs, std::vector<std::pair<int, int>>& match_result) {
