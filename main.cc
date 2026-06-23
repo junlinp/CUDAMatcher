@@ -57,19 +57,19 @@ void PrintMetrics(const std::string& name, const BenchmarkResult& result, size_t
     }
     double seconds = result.wall_best_ms / 1000.0;
     double gflops = EstimatedFlops(name, descriptor_num) / seconds / 1e9;
-    double bandwidth = EstimatedMemoryBytes(name, descriptor_num) / seconds / 1e9;
+    double logical_gbytes = EstimatedMemoryBytes(name, descriptor_num) / seconds / 1e9;
     std::cout << name << " wall best : " << std::fixed << std::setprecision(3) << result.wall_best_ms << " ms" << std::endl;
     std::cout << name << " wall avg : " << std::fixed << std::setprecision(3) << result.wall_avg_ms << " ms" << std::endl;
-    std::cout << name << " wall-best estimated compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
-    std::cout << name << " wall-best estimated bandwidth : " << std::fixed << std::setprecision(2) << bandwidth << " GB/s" << std::endl;
+    std::cout << name << " wall-best algorithmic compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
+    std::cout << name << " wall-best estimated logical bytes : " << std::fixed << std::setprecision(2) << logical_gbytes << " GB/s" << std::endl;
     if (result.device_best_ms > 0.0f) {
         double device_seconds = static_cast<double>(result.device_best_ms) / 1000.0;
         double device_gflops = EstimatedFlops(name, descriptor_num) / device_seconds / 1e9;
-        double device_bandwidth = EstimatedMemoryBytes(name, descriptor_num) / device_seconds / 1e9;
+        double device_logical_gbytes = EstimatedMemoryBytes(name, descriptor_num) / device_seconds / 1e9;
         std::cout << name << " device best : " << std::fixed << std::setprecision(3) << result.device_best_ms << " ms" << std::endl;
         std::cout << name << " device avg : " << std::fixed << std::setprecision(3) << result.device_avg_ms << " ms" << std::endl;
-        std::cout << name << " device-best estimated compute : " << std::fixed << std::setprecision(2) << device_gflops << " GFLOP/s" << std::endl;
-        std::cout << name << " device-best estimated bandwidth : " << std::fixed << std::setprecision(2) << device_bandwidth << " GB/s" << std::endl;
+        std::cout << name << " device-best algorithmic compute : " << std::fixed << std::setprecision(2) << device_gflops << " GFLOP/s" << std::endl;
+        std::cout << name << " device-best estimated logical bytes : " << std::fixed << std::setprecision(2) << device_logical_gbytes << " GB/s" << std::endl;
     }
 }
 
@@ -81,11 +81,11 @@ void PrintKernelMetrics(const std::string& name, const KernelBenchmarkResult& re
     }
     double seconds = static_cast<double>(result.best_ms) / 1000.0;
     double gflops = EstimatedFlops(name, descriptor_num) / seconds / 1e9;
-    double bandwidth = EstimatedMemoryBytes(name, descriptor_num) / seconds / 1e9;
+    double logical_gbytes = EstimatedMemoryBytes(name, descriptor_num) / seconds / 1e9;
     std::cout << name << " kernel-only best : " << std::fixed << std::setprecision(3) << result.best_ms << " ms" << std::endl;
     std::cout << name << " kernel-only avg : " << std::fixed << std::setprecision(3) << result.avg_ms << " ms" << std::endl;
-    std::cout << name << " kernel-only estimated compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
-    std::cout << name << " kernel-only estimated bandwidth : " << std::fixed << std::setprecision(2) << bandwidth << " GB/s" << std::endl;
+    std::cout << name << " kernel-only algorithmic compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
+    std::cout << name << " kernel-only estimated logical bytes : " << std::fixed << std::setprecision(2) << logical_gbytes << " GB/s" << std::endl;
 }
 
 void RunKernelOnlyBenchmarks(const std::vector<Descriptor>& lhs,
@@ -191,7 +191,7 @@ void RunV10PersistentBenchmark(const std::vector<Descriptor>& lhs,
     double wall_avg_ms = wall_sum_ms / static_cast<double>(measured_runs);
     double seconds = wall_best_ms / 1000.0;
     double gflops = EstimatedFlops("v10", descriptor_num) / seconds / 1e9;
-    double bandwidth = EstimatedMemoryBytes("v10", descriptor_num) / seconds / 1e9;
+    double logical_gbytes = EstimatedMemoryBytes("v10", descriptor_num) / seconds / 1e9;
 
     std::cout << "v10 persistent measured runs : " << measured_runs << " + " << warmup_runs << " warmup" << std::endl;
     std::cout << "v10 persistent mismatch count : " << mismatch_count << std::endl;
@@ -200,8 +200,8 @@ void RunV10PersistentBenchmark(const std::vector<Descriptor>& lhs,
     }
     std::cout << "v10 persistent run best : " << std::fixed << std::setprecision(3) << wall_best_ms << " ms" << std::endl;
     std::cout << "v10 persistent run avg : " << std::fixed << std::setprecision(3) << wall_avg_ms << " ms" << std::endl;
-    std::cout << "v10 persistent estimated compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
-    std::cout << "v10 persistent estimated bandwidth : " << std::fixed << std::setprecision(2) << bandwidth << " GB/s" << std::endl;
+    std::cout << "v10 persistent algorithmic compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
+    std::cout << "v10 persistent estimated logical bytes : " << std::fixed << std::setprecision(2) << logical_gbytes << " GB/s" << std::endl;
 
     DestroyMatchV10Context(context);
 }
