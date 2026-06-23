@@ -7,11 +7,13 @@
 #include <iostream>
 #include <iomanip>
 #include <string>
+#include "cuda_runtime.h"
 #include "match.h"
 
 struct BenchmarkResult {
     bool success;
     long long elapsed_ms;
+    float device_elapsed_ms;
     int mismatch_count;
 };
 
@@ -55,6 +57,14 @@ void PrintMetrics(const std::string& name, const BenchmarkResult& result, size_t
     double bandwidth = EstimatedMemoryBytes(name, descriptor_num) / seconds / 1e9;
     std::cout << name << " estimated compute : " << std::fixed << std::setprecision(2) << gflops << " GFLOP/s" << std::endl;
     std::cout << name << " estimated bandwidth : " << std::fixed << std::setprecision(2) << bandwidth << " GB/s" << std::endl;
+    if (result.device_elapsed_ms > 0.0f) {
+        double device_seconds = static_cast<double>(result.device_elapsed_ms) / 1000.0;
+        double device_gflops = EstimatedFlops(name, descriptor_num) / device_seconds / 1e9;
+        double device_bandwidth = EstimatedMemoryBytes(name, descriptor_num) / device_seconds / 1e9;
+        std::cout << name << " device elapsed : " << std::fixed << std::setprecision(3) << result.device_elapsed_ms << " ms" << std::endl;
+        std::cout << name << " device estimated compute : " << std::fixed << std::setprecision(2) << device_gflops << " GFLOP/s" << std::endl;
+        std::cout << name << " device estimated bandwidth : " << std::fixed << std::setprecision(2) << device_bandwidth << " GB/s" << std::endl;
+    }
 }
 
 BenchmarkResult RunBenchmark(const std::string& name,
@@ -66,9 +76,20 @@ BenchmarkResult RunBenchmark(const std::string& name,
                              const std::vector<int>& expected_match,
                              size_t descriptor_num) {
     std::vector<std::pair<int, int>> match_result;
+    cudaEvent_t device_start = nullptr;
+    cudaEvent_t device_stop = nullptr;
+    float device_elapsed_ms = 0.0f;
+    cudaEventCreate(&device_start);
+    cudaEventCreate(&device_stop);
+    cudaEventRecord(device_start, 0);
     auto start = std::chrono::high_resolution_clock::now();
     bool success = matcher(lhs, rhs, match_result);
     auto end = std::chrono::high_resolution_clock::now();
+    cudaEventRecord(device_stop, 0);
+    cudaEventSynchronize(device_stop);
+    cudaEventElapsedTime(&device_elapsed_ms, device_start, device_stop);
+    cudaEventDestroy(device_start);
+    cudaEventDestroy(device_stop);
     long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
     int mismatch_count = 0;
@@ -91,6 +112,7 @@ BenchmarkResult RunBenchmark(const std::string& name,
     BenchmarkResult result;
     result.success = success;
     result.elapsed_ms = elapsed_ms;
+    result.device_elapsed_ms = device_elapsed_ms;
     result.mismatch_count = mismatch_count;
     PrintMetrics(name, result, descriptor_num);
     return result;

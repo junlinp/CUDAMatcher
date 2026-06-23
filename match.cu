@@ -1064,11 +1064,14 @@ __global__ void ComputeTop1FromDotV9(const float* dots, const float* lhs_norm, c
 
 __global__ void ComputeNearestNeighborV9WMMA(const __half* pts1, const __half* pts2, const float* lhs_norm, const float* rhs_norm, float* score, int* index, int WIDTH) {
 	using namespace nvcuda;
-	int lane = threadIdx.x;
+	int lane = threadIdx.x & 31;
+	int warp_id = threadIdx.x >> 5;
 	int a_base = blockIdx.x * 16;
 	int row = lane;
 
-	__shared__ float dot_tile[16 * 16];
+	__shared__ float dot_tile[4 * 16 * 16];
+	__shared__ float warp_best_score[4 * 16];
+	__shared__ int warp_best_index[4 * 16];
 	float best_score = 1e30f;
 	int best_index = -1;
 	float lhs_norm_value = 0.0f;
@@ -1076,41 +1079,61 @@ __global__ void ComputeNearestNeighborV9WMMA(const __half* pts1, const __half* p
 		lhs_norm_value = lhs_norm[a_base + row];
 	}
 
-	for (int b_base = 0; b_base < WIDTH; b_base += 16) {
+	for (int b_base = 0; b_base < WIDTH; b_base += 64) {
+		int b_sub_base = b_base + warp_id * 16;
 		wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
 		wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
 		wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc_frag;
 		wmma::fill_fragment(acc_frag, 0.0f);
 
-		for (int k = 0; k < 128; k += 16) {
-			const __half* a_ptr = pts1 + a_base * 128 + k;
-			const __half* b_ptr = pts2 + b_base * 128 + k;
-			wmma::load_matrix_sync(a_frag, a_ptr, 128);
-			wmma::load_matrix_sync(b_frag, b_ptr, 128);
-			wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+		if (b_sub_base < WIDTH) {
+			for (int k = 0; k < 128; k += 16) {
+				const __half* a_ptr = pts1 + a_base * 128 + k;
+				const __half* b_ptr = pts2 + b_sub_base * 128 + k;
+				wmma::load_matrix_sync(a_frag, a_ptr, 128);
+				wmma::load_matrix_sync(b_frag, b_ptr, 128);
+				wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+			}
 		}
 
-		wmma::store_matrix_sync(dot_tile, acc_frag, 16, wmma::mem_row_major);
+		wmma::store_matrix_sync(dot_tile + warp_id * 16 * 16, acc_frag, 16, wmma::mem_row_major);
 		__syncthreads();
 
-		if (row < 16 && a_base + row < WIDTH) {
-			for (int col = 0; col < 16 && b_base + col < WIDTH; col++) {
-				float d = lhs_norm_value + rhs_norm[b_base + col] - 2.0f * dot_tile[row * 16 + col];
+		if (row < 16 && a_base + row < WIDTH && b_sub_base < WIDTH) {
+			const float* warp_dot = dot_tile + warp_id * 16 * 16;
+			for (int col = 0; col < 16 && b_sub_base + col < WIDTH; col++) {
+				float d = lhs_norm_value + rhs_norm[b_sub_base + col] - 2.0f * warp_dot[row * 16 + col];
 				if (d < best_score) {
 					best_score = d;
-					best_index = b_base + col;
+					best_index = b_sub_base + col;
 				}
 			}
 		}
 		__syncthreads();
 	}
 
-	if (row < 16 && a_base + row < WIDTH) {
-		if (best_score < 0.0f && best_score > -1e-4f) {
-			best_score = 0.0f;
+	if (row < 16) {
+		warp_best_score[warp_id * 16 + row] = best_score;
+		warp_best_index[warp_id * 16 + row] = best_index;
+	}
+	__syncthreads();
+
+	if (warp_id == 0 && row < 16 && a_base + row < WIDTH) {
+		float final_best_score = warp_best_score[row];
+		int final_best_index = warp_best_index[row];
+		for (int i = 1; i < 4; i++) {
+			float candidate_score = warp_best_score[i * 16 + row];
+			int candidate_index = warp_best_index[i * 16 + row];
+			if (candidate_score < final_best_score) {
+				final_best_score = candidate_score;
+				final_best_index = candidate_index;
+			}
 		}
-		score[a_base + row] = best_score;
-		index[a_base + row] = best_index;
+		if (final_best_score < 0.0f && final_best_score > -1e-4f) {
+			final_best_score = 0.0f;
+		}
+		score[a_base + row] = final_best_score;
+		index[a_base + row] = final_best_index;
 	}
 }
 
@@ -1630,7 +1653,7 @@ bool MatchV9(const std::vector<Descriptor>& lhs,const std::vector<Descriptor>& r
 	float* device_score = nullptr;
 	int* host_index = nullptr;
 	int* device_index = nullptr;
-	dim3 top1_thread(32);
+	dim3 top1_thread(128);
 	dim3 top1_block(size / 16);
 	bool success = false;
 

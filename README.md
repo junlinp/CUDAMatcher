@@ -64,8 +64,9 @@ bool MatchV9(...);
   loaded as `half2` in the CUDA kernel, accumulated in FP32, and reduced online
   to top-1 without building an `N x N` matrix.
 - `v9`: custom WMMA/Tensor Core online top-1 path. Descriptors are converted to
-  `half`, each `16 x 16` dot tile is computed with WMMA, distances are recovered
-  from `||a||² + ||b||² - 2ABᵀ`, and top-1 is updated immediately without
+  `half`, each CTA owns a 16-row A tile and uses four warps to compute four
+  `16 x 16` B subtiles with WMMA per scan step. Distances are recovered from
+  `||a||² + ||b||² - 2ABᵀ`, and top-1 is updated immediately without
   materializing the full `N x N` dot matrix.
 
 On an NVIDIA GeForce RTX 3050 Ti Laptop GPU, the matcher benchmark for
@@ -87,23 +88,24 @@ Memory bandwidth: ~192.03 GB/s
 
 ```text
 version  time  estimated compute  estimated bandwidth
-v1       223 ms   462.24 GFLOP/s    28.93 GB/s
-v2        83 ms  1241.92 GFLOP/s    51.85 GB/s
-v3        68 ms  1515.87 GFLOP/s    63.28 GB/s
-v4       290 ms   355.45 GFLOP/s    59.27 GB/s
+v1        74 ms  1392.96 GFLOP/s    87.17 GB/s
+v2        77 ms  1338.69 GFLOP/s    55.89 GB/s
+v3        65 ms  1585.83 GFLOP/s    66.21 GB/s
+v4       298 ms   345.90 GFLOP/s    57.68 GB/s
 v5        98 ms  1051.83 GFLOP/s    43.91 GB/s
-v5a       64 ms  1610.61 GFLOP/s    67.24 GB/s
-v5b       66 ms  1561.81 GFLOP/s    65.20 GB/s
-v5c      103 ms  1000.77 GFLOP/s    41.78 GB/s
-v6        67 ms  1538.50 GFLOP/s    64.23 GB/s
-v7        63 ms  1636.18 GFLOP/s    68.31 GB/s
-v8       115 ms   896.34 GFLOP/s    18.71 GB/s
-v9       127 ms   547.44 GFLOP/s    34.38 GB/s
+v5a       61 ms  1689.82 GFLOP/s    70.55 GB/s
+v5b       63 ms  1636.18 GFLOP/s    68.31 GB/s
+v5c      102 ms  1010.58 GFLOP/s    42.19 GB/s
+v6        66 ms  1561.81 GFLOP/s    65.20 GB/s
+v7        59 ms  1747.11 GFLOP/s    72.94 GB/s
+v8       112 ms   920.35 GFLOP/s    19.21 GB/s
+v9       135 ms   515.00 GFLOP/s    32.34 GB/s
 ```
 
 All runs reported 0 mismatches. The compute and bandwidth columns are benchmark
 estimates based on the algorithm's modeled FLOPs and memory traffic, not Nsight
-hardware counters.
+hardware counters. The benchmark also prints CUDA event device elapsed time and
+device-side estimated compute/bandwidth for each version.
 
 ## Build
 
